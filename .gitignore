@@ -1,0 +1,38 @@
+# Secrets & environment
+.env
+.env.local
+.env.*.local
+*.key
+.ledger.key
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+.pytest_cache/
+*.egg-info/
+
+# Database & local encrypted state
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+backend/data/
+
+# Node & Frontend build
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+*.log
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+

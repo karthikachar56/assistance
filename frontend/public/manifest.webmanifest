@@ -1,0 +1,17 @@
+{
+  "name": "Voice Khata - Kirana AI Ledger",
+  "short_name": "Voice Khata",
+  "description": "Multilingual AI voice ledger for kirana stores powered by Gemini AI and Gnani Speech adapters.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#FAF7F0",
+  "theme_color": "#D95D1E",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}
+
