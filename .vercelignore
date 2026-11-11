@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+.ledger.key
+*.key
+*.db
+*.db-wal
+*.db-shm
+backend/.venv/
+backend/data/
+backend/.pytest_cache/
+backend/tests/
+frontend/node_modules/
+frontend/dist/
+**/__pycache__/
+

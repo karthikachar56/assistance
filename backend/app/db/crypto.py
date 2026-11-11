@@ -4,16 +4,21 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import logging
 import os
+import tempfile
 from pathlib import Path
 
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from app.config import ROOT_DIR, get_settings
 
 
+logger = logging.getLogger(__name__)
 _NONCE_LEN = 12
 _KEY_FILE = ROOT_DIR / ".ledger.key"
+_TMP_KEY_FILE = Path(tempfile.gettempdir()) / "voice_khata_ledger.key"
 
 
 def _decode_or_derive_key(raw: str) -> bytes:
@@ -42,9 +47,18 @@ class FieldCipher:
             key = _decode_or_derive_key(raw)
         elif _KEY_FILE.exists():
             key = _decode_or_derive_key(_KEY_FILE.read_text(encoding="utf-8"))
+        elif _TMP_KEY_FILE.exists():
+            key = _decode_or_derive_key(_TMP_KEY_FILE.read_text(encoding="utf-8"))
         else:
             generated = base64.urlsafe_b64encode(os.urandom(32)).decode("ascii")
-            _KEY_FILE.write_text(generated, encoding="utf-8")
+            target_file = _TMP_KEY_FILE if os.environ.get("VERCEL") else _KEY_FILE
+            try:
+                target_file.write_text(generated, encoding="utf-8")
+            except OSError:
+                try:
+                    _TMP_KEY_FILE.write_text(generated, encoding="utf-8")
+                except OSError:
+                    pass
             key = _decode_or_derive_key(generated)
         self._aes = AESGCM(key)
 
@@ -64,5 +78,9 @@ class FieldCipher:
             return token
         raw = base64.urlsafe_b64decode(token[len("enc:v1:") :].encode("ascii"))
         nonce, ciphertext = raw[:_NONCE_LEN], raw[_NONCE_LEN:]
-        return self._aes.decrypt(nonce, ciphertext, None).decode("utf-8")
+        try:
+            return self._aes.decrypt(nonce, ciphertext, None).decode("utf-8")
+        except InvalidTag:
+            logger.warning("Failed to decrypt ciphertext token; check LEDGER_ENCRYPTION_KEY.")
+            return None
 

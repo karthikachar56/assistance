@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from fastapi import APIRouter, Depends
 
 from app.deps import AppContainer, get_container
@@ -19,6 +21,7 @@ def get_system_status(container: AppContainer = Depends(get_container)) -> dict:
         "status": "ok",
         "gemini_configured": container.settings.has_gemini,
         "gnani_configured": container.gnani.is_available,
+        "live_ws_supported": not bool(os.environ.get("VERCEL")),
         "database_backend": container.db.backend_name,
         "database_name": container.db.database_label,
         "models": {

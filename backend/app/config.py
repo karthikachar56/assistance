@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from functools import lru_cache
+import os
 from pathlib import Path
+import tempfile
 from typing import Literal
 
 from pydantic import AliasChoices, Field
@@ -76,7 +78,10 @@ class Settings(BaseSettings):
     @property
     def resolved_database_path(self) -> str:
         p = Path(self.database_path)
-        return str(p if p.is_absolute() else (ROOT_DIR / p))
+        resolved = p if p.is_absolute() else (ROOT_DIR / p)
+        if os.environ.get("VERCEL") and not str(resolved).startswith(tempfile.gettempdir()):
+            return str(Path(tempfile.gettempdir()) / resolved.name)
+        return str(resolved)
 
     @property
     def cors_origin_list(self) -> list[str]:

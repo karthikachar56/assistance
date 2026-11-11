@@ -49,3 +49,39 @@ def test_dpdp_wipe_and_csv_export(api_client):
     assert csv_res.status_code == 200
     assert "Customer,Date,Type,Amount (INR)" in csv_res.text
 
+
+def test_vercel_serverless_entrypoint_and_readonly_safety(monkeypatch, tmp_path, api_client):
+    import importlib.util
+    import tempfile
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+
+    from app.config import ROOT_DIR, Settings
+    from app.db import crypto as crypto_mod
+
+    monkeypatch.setenv("VERCEL", "1")
+    tmp_db = Settings(ledger_encryption_key="vercel-test-key", mongodb_url="").resolved_database_path
+    assert Path(tmp_db).parent == Path(tempfile.gettempdir())
+
+    # Simulate read-only repo directory where _KEY_FILE cannot be written
+    monkeypatch.setattr(crypto_mod, "_KEY_FILE", tmp_path / "missing_ro_dir" / ".ledger.key")
+    monkeypatch.setattr(crypto_mod, "_TMP_KEY_FILE", tmp_path / "tmp_vercel_ledger.key")
+    cipher_vercel = crypto_mod.FieldCipher("")
+    cipher_other = crypto_mod.FieldCipher("completely-different-local-key")
+    foreign_cipher_token = cipher_other.encrypt("+91-9876543210")
+    assert cipher_vercel.decrypt(foreign_cipher_token) is None
+
+    # Verify root api/index.py loads FastAPI cleanly and reports live_ws_supported=False on Vercel
+    spec = importlib.util.spec_from_file_location("vercel_api_index", ROOT_DIR / "api" / "index.py")
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    with TestClient(mod.app) as client:
+        assert client.get("/health").json() == {"status": "healthy"}
+        status_body = client.get("/api/status").json()
+        assert status_body["status"] == "ok"
+        assert status_body["live_ws_supported"] is False
+
+

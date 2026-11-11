@@ -12,6 +12,7 @@ export function JarvisHud({
   useLiveStream,
   interactiveConfirm,
   geminiConfigured,
+  liveWsSupported = true,
   micLevel,
   micInfo,
   liveUserText,
@@ -94,8 +95,14 @@ export function JarvisHud({
             type="button"
             className={`jarvis-pill-btn ${useLiveStream ? "active" : ""}`}
             onClick={() => onToggleLiveStream(!useLiveStream)}
-            disabled={!geminiConfigured}
-            title={geminiConfigured ? "Switch between Gemini Live Stream and Push-to-Talk" : "Requires Gemini API Key"}
+            disabled={!geminiConfigured || !liveWsSupported}
+            title={
+              !liveWsSupported
+                ? "Real-time /ws/live requires a WebSocket server (Push-to-Talk & Cloud Audio REST are active)"
+                : geminiConfigured
+                ? "Switch between Gemini Live Stream and Push-to-Talk"
+                : "Requires Gemini API Key"
+            }
           >
             <Radio size={13} /> {useLiveStream ? "Live AI: ON" : "Push-to-Talk"}
           </button>

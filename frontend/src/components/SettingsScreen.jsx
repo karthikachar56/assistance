@@ -81,8 +81,14 @@ export function SettingsScreen({
           </label>
 
           <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: "0.86rem" }}>
-            <input type="checkbox" checked={useLiveStream} onChange={(e) => onToggleLiveStream(e.target.checked)} />
+            <input
+              type="checkbox"
+              checked={useLiveStream}
+              disabled={statusInfo?.live_ws_supported === false}
+              onChange={(e) => onToggleLiveStream(e.target.checked)}
+            />
             Enable Real-Time Assistant Gemini 3.8 Live Voice Mode (/ws/live)
+            {statusInfo?.live_ws_supported === false && " (unavailable on serverless; using Push-to-Talk + Cloud REST)"}
           </label>
 
           <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: "0.86rem" }}>

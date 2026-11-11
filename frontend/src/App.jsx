@@ -120,7 +120,7 @@ export default function App() {
         if (st.gemini_configured || st.gnani_configured) {
           setUseDirectAudio(true);
         }
-        if (st.gemini_configured) {
+        if (st.gemini_configured && st.live_ws_supported !== false) {
           setUseLiveStream(true);
         }
       }
@@ -493,6 +493,7 @@ export default function App() {
           useLiveStream={useLiveStream}
           interactiveConfirm={interactiveConfirm}
           geminiConfigured={Boolean(statusInfo?.gemini_configured)}
+          liveWsSupported={statusInfo?.live_ws_supported !== false}
           micLevel={micLevel}
           micInfo={micInfo}
           liveUserText={liveUserText}
