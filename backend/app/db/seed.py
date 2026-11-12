@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 
 from app.db.crypto import FieldCipher
-from app.db.store import KhataStore, normalize_name
+from app.db.store import KhataStore, default_tenant_settings, normalize_name
 
 
 def seed_synthetic_data(store: KhataStore, cipher: FieldCipher) -> None:
@@ -69,13 +69,5 @@ def seed_synthetic_data(store: KhataStore, cipher: FieldCipher) -> None:
                 created_at=now_iso,
             )
 
-        store.ensure_default_settings(
-            [
-                ("preferred_language", "hi-IN"),
-                ("ai_mode", "cascaded"),
-                ("speech_provider", "auto"),
-                ("ephemeral_transcripts", "false"),
-                ("dpdp_consent_accepted", "false"),
-            ]
-        )
+        store.ensure_default_settings(default_tenant_settings("hi-IN"))
 

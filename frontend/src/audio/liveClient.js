@@ -6,6 +6,8 @@
  * - Separate playback AudioContext for jitter-free 24kHz PCM responses & barge-in interruption clearing
  */
 
+import { getAuthToken } from "../api/client";
+
 const WORKLET_PROCESSOR_CODE = `
 class PcmCaptureProcessor extends AudioWorkletProcessor {
   constructor() {
@@ -352,6 +354,8 @@ export class GeminiLiveClient {
       voice: voice || "Charon",
     });
     if (this.resumeHandle) qs.set("resume_handle", this.resumeHandle);
+    const authToken = getAuthToken();
+    if (authToken) qs.set("token", authToken);
     const url = `${proto}//${window.location.host}/ws/live?${qs.toString()}`;
 
     const ws = new WebSocket(url);

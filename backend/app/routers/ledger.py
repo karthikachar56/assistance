@@ -9,7 +9,8 @@ from datetime import date
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
-from app.deps import AppContainer, get_container
+from app.deps import AppContainer
+from app.routers.auth import get_scoped_container
 from app.schemas.models import (
     CustomerBreakdownItem,
     CustomerCreate,
@@ -60,7 +61,7 @@ def _row_to_tx(row: dict) -> TransactionOut:
 
 
 @router.get("/dashboard", response_model=DashboardSummary)
-def get_dashboard(container: AppContainer = Depends(get_container)) -> DashboardSummary:
+def get_dashboard(container: AppContainer = Depends(get_scoped_container)) -> DashboardSummary:
     summary = container.db.get_dashboard_summary(today_str=date.today().isoformat(), recent_limit=12)
     recent = [_row_to_tx(r) for r in summary["recent_transactions"]]
     return DashboardSummary(
@@ -76,13 +77,13 @@ def get_dashboard(container: AppContainer = Depends(get_container)) -> Dashboard
 
 
 @router.get("/customers", response_model=list[CustomerOut])
-def list_customers(q: str = "", container: AppContainer = Depends(get_container)) -> list[CustomerOut]:
+def list_customers(q: str = "", container: AppContainer = Depends(get_scoped_container)) -> list[CustomerOut]:
     rows = container.db.list_customers_with_totals(search_query=q)
     return [_row_to_customer(r, container) for r in rows]
 
 
 @router.post("/customers", response_model=CustomerOut, status_code=201)
-def create_customer(req: CustomerCreate, container: AppContainer = Depends(get_container)) -> CustomerOut:
+def create_customer(req: CustomerCreate, container: AppContainer = Depends(get_scoped_container)) -> CustomerOut:
     row = container.db.create_customer(
         name=req.name.strip(),
         phone_enc=container.cipher.encrypt(req.phone.strip()) if req.phone else None,
@@ -97,7 +98,7 @@ def create_customer(req: CustomerCreate, container: AppContainer = Depends(get_c
 def update_customer(
     customer_id: int,
     req: CustomerUpdate,
-    container: AppContainer = Depends(get_container),
+    container: AppContainer = Depends(get_scoped_container),
 ) -> CustomerOut:
     existing = container.db.get_customer_by_id(customer_id)
     if not existing:
@@ -123,7 +124,7 @@ def update_customer(
 
 
 @router.delete("/customers/{customer_id}")
-def delete_customer(customer_id: int, container: AppContainer = Depends(get_container)) -> dict:
+def delete_customer(customer_id: int, container: AppContainer = Depends(get_scoped_container)) -> dict:
     """Manual-only customer deletion endpoint (AI assistants never invoke delete)."""
     deleted = container.db.delete_customer(customer_id)
     if not deleted:
@@ -132,7 +133,7 @@ def delete_customer(customer_id: int, container: AppContainer = Depends(get_cont
 
 
 @router.get("/customers/{customer_id}/transactions", response_model=list[TransactionOut])
-def get_customer_transactions(customer_id: int, container: AppContainer = Depends(get_container)) -> list[TransactionOut]:
+def get_customer_transactions(customer_id: int, container: AppContainer = Depends(get_scoped_container)) -> list[TransactionOut]:
     rows = container.db.list_customer_transactions(customer_id)
     return [_row_to_tx(r) for r in rows]
 
@@ -140,7 +141,7 @@ def get_customer_transactions(customer_id: int, container: AppContainer = Depend
 @router.get("/transactions", response_model=list[TransactionOut])
 def list_transactions(
     customer_id: int | None = None,
-    container: AppContainer = Depends(get_container),
+    container: AppContainer = Depends(get_scoped_container),
 ) -> list[TransactionOut]:
     rows = (
         container.db.list_customer_transactions(customer_id)
@@ -153,7 +154,7 @@ def list_transactions(
 @router.post("/transactions", response_model=TransactionOut, status_code=201)
 def create_manual_transaction(
     req: ManualTransactionCreate,
-    container: AppContainer = Depends(get_container),
+    container: AppContainer = Depends(get_scoped_container),
 ) -> TransactionOut:
     tx_date = req.transaction_date or date.today().isoformat()
     cust = container.db.get_customer_by_id(req.customer_id)
@@ -176,7 +177,7 @@ def create_manual_transaction(
 
 
 @router.post("/reminders/send", response_model=ReminderResponse)
-def send_polite_reminder(req: ReminderRequest, container: AppContainer = Depends(get_container)) -> ReminderResponse:
+def send_polite_reminder(req: ReminderRequest, container: AppContainer = Depends(get_scoped_container)) -> ReminderResponse:
     row = container.db.get_customer_with_totals(req.customer_id)
     if not row:
         raise HTTPException(status_code=404, detail="Customer not found.")
@@ -201,12 +202,12 @@ def send_polite_reminder(req: ReminderRequest, container: AppContainer = Depends
 
 
 @router.get("/audit")
-def list_audit_logs(limit: int = 50, container: AppContainer = Depends(get_container)) -> list[dict]:
+def list_audit_logs(limit: int = 50, container: AppContainer = Depends(get_scoped_container)) -> list[dict]:
     return container.db.list_audit_logs(limit=limit)
 
 
 @router.get("/export/csv")
-def export_ledger_csv(customer_id: int | None = None, container: AppContainer = Depends(get_container)):
+def export_ledger_csv(customer_id: int | None = None, container: AppContainer = Depends(get_scoped_container)):
     rows = container.db.export_transactions(customer_id=customer_id)
 
     buf = io.StringIO()

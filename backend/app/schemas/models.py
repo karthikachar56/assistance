@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 TxType = Literal["credit", "payment"]
@@ -299,4 +299,64 @@ class SettingsUpdate(BaseModel):
     speech_provider: Literal["auto", "gemini", "gnani", "browser"] | None = None
     ephemeral_transcripts: bool | None = None
     dpdp_consent_accepted: bool | None = None
+
+
+def _normalize_valid_email(value: str) -> str:
+    cleaned = value.strip().lower()
+    if "@" not in cleaned:
+        raise ValueError("Enter a valid email address.")
+    local, domain = cleaned.split("@", 1)
+    if not local or "." not in domain or domain.startswith(".") or domain.endswith(".") or " " in cleaned:
+        raise ValueError("Enter a valid email address.")
+    return cleaned
+
+
+class UserSignUpRequest(BaseModel):
+    name: str = Field(min_length=2, max_length=80)
+    shop_name: str | None = Field(default=None, max_length=100)
+    email: str = Field(min_length=5, max_length=160)
+    phone: str | None = Field(default=None, max_length=24)
+    password: str = Field(min_length=6, max_length=128)
+    preferred_language: LanguageCode = "hi-IN"
+
+    @field_validator("email")
+    @classmethod
+    def _validate_email(cls, value: str) -> str:
+        return _normalize_valid_email(value)
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        cleaned = value.strip()
+        if len(cleaned) < 2:
+            raise ValueError("Name must be at least 2 characters.")
+        return cleaned
+
+
+class UserLoginRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=160)
+    password: str = Field(min_length=1, max_length=128)
+
+    @field_validator("email")
+    @classmethod
+    def _validate_email(cls, value: str) -> str:
+        return _normalize_valid_email(value)
+
+
+class UserOut(BaseModel):
+    id: int
+    name: str
+    shop_name: str
+    email: str
+    phone: str | None = None
+    preferred_language: str
+    created_at: str
+    last_login_at: str | None = None
+
+
+class AuthResponse(BaseModel):
+    access_token: str
+    token_type: Literal["bearer"] = "bearer"
+    user: UserOut
+
 

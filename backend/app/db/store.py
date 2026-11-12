@@ -12,6 +12,7 @@ from typing import Any, Iterator, Protocol
 from urllib.parse import urlparse
 
 from pymongo import ASCENDING, DESCENDING, MongoClient, ReturnDocument
+from pymongo.errors import DuplicateKeyError, OperationFailure
 
 from app.db.database import Database
 
@@ -19,6 +20,22 @@ from app.db.database import Database
 def normalize_name(name: str) -> str:
     """Normalize customer names for reliable case-insensitive fuzzy lookup."""
     return " ".join(name.strip().lower().split())
+
+
+def normalize_email(email: str) -> str:
+    """Normalize user email addresses for case-insensitive account lookup."""
+    return email.strip().lower()
+
+
+def default_tenant_settings(preferred_language: str = "hi-IN") -> list[tuple[str, str]]:
+    """Initial per-account settings stored inside each isolated khata database."""
+    return [
+        ("preferred_language", preferred_language or "hi-IN"),
+        ("ai_mode", "cascaded"),
+        ("speech_provider", "auto"),
+        ("ephemeral_transcripts", "false"),
+        ("dpdp_consent_accepted", "false"),
+    ]
 
 
 def _utc_now_iso() -> str:
@@ -165,18 +182,36 @@ class KhataStore(Protocol):
     def get_setting(self, key: str, default: str) -> str: ...
     def upsert_settings(self, updates: dict[str, str]) -> dict[str, str]: ...
     def wipe_demo_transcripts(self) -> int: ...
+    def get_user_by_email(self, email: str) -> dict | None: ...
+    def get_user_by_id(self, user_id: int) -> dict | None: ...
+    def create_user(
+        self,
+        *,
+        name: str,
+        shop_name: str,
+        email: str,
+        phone_enc: str | None,
+        password_hash: str,
+        preferred_language: str = "hi-IN",
+        created_at: str | None = None,
+    ) -> dict: ...
+    def update_user_last_login(self, user_id: int, last_login_at: str) -> None: ...
+    def for_user(self, user_id: int, preferred_language: str = "hi-IN") -> "KhataStore": ...
 
 
 class SqliteKhataStore:
-    """SQLite-backed store with thread-local unit-of-work and legacy connection helpers."""
+    """SQLite-backed store with thread-local unit-of-work and per-user DB isolation."""
 
     backend_name = "sqlite"
 
-    def __init__(self, db_path: str | Path | None = None) -> None:
+    def __init__(self, db_path: str | Path | None = None, *, is_tenant: bool = False) -> None:
         self.db = Database(db_path=db_path)
         self.db_path = self.db.db_path
         self.database_label = self.db.db_path.name
+        self._is_tenant = is_tenant
         self._local = threading.local()
+        self._tenant_lock = threading.Lock()
+        self._tenant_stores: dict[int, "SqliteKhataStore"] = {}
 
     def connect(self) -> sqlite3.Connection:
         """Legacy helper for SQLite-specific diagnostic tests."""
@@ -813,6 +848,76 @@ class SqliteKhataStore:
             conn.execute("UPDATE voice_sessions SET pending_action_json = NULL, last_committed_tx_ids_json = NULL")
             return deleted
 
+    def get_user_by_email(self, email: str) -> dict | None:
+        clean_email = normalize_email(email)
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM users WHERE email = ?", (clean_email,)).fetchone()
+            return dict(row) if row else None
+
+    def get_user_by_id(self, user_id: int) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM users WHERE id = ?", (int(user_id),)).fetchone()
+            return dict(row) if row else None
+
+    def create_user(
+        self,
+        *,
+        name: str,
+        shop_name: str,
+        email: str,
+        phone_enc: str | None,
+        password_hash: str,
+        preferred_language: str = "hi-IN",
+        created_at: str | None = None,
+    ) -> dict:
+        now = created_at or _utc_now_iso()
+        clean_email = normalize_email(email)
+        try:
+            with self._conn(write=True) as conn:
+                cur = conn.execute(
+                    """
+                    INSERT INTO users (name, shop_name, email, phone_enc, password_hash, preferred_language, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        name.strip(),
+                        shop_name.strip(),
+                        clean_email,
+                        phone_enc,
+                        password_hash,
+                        preferred_language,
+                        now,
+                    ),
+                )
+                uid = int(cur.lastrowid)
+                row = conn.execute("SELECT * FROM users WHERE id = ?", (uid,)).fetchone()
+                return dict(row)
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("An account with this email already exists.") from exc
+
+    def update_user_last_login(self, user_id: int, last_login_at: str) -> None:
+        with self._conn(write=True) as conn:
+            conn.execute(
+                "UPDATE users SET last_login_at = ? WHERE id = ?",
+                (last_login_at, int(user_id)),
+            )
+
+    def for_user(self, user_id: int, preferred_language: str = "hi-IN") -> "SqliteKhataStore":
+        """Return a dedicated SQLite database file scoped strictly to user_id."""
+        if self._is_tenant:
+            return self
+        uid = int(user_id)
+        with self._tenant_lock:
+            cached = self._tenant_stores.get(uid)
+            if cached is not None:
+                return cached
+            tenant_dir = self.db_path.parent / f"{self.db_path.stem}_tenants"
+            tenant_path = tenant_dir / f"user_{uid}.db"
+            store = SqliteKhataStore(db_path=tenant_path, is_tenant=True)
+            store.ensure_default_settings(default_tenant_settings(preferred_language))
+            self._tenant_stores[uid] = store
+            return store
+
 
 def _resolve_mongo_db_name(mongo_url: str, configured_db_name: str) -> str:
     """Use configured DB name unless URL specifies a custom path DB and config is untouched."""
@@ -844,7 +949,7 @@ def _build_mongo_client_kwargs(mongo_url: str) -> dict[str, Any]:
 
 
 class MongoKhataStore:
-    """MongoDB-backed store using atomic integer sequences to keep API schemas unchanged."""
+    """MongoDB-backed store with per-user DB (or collection-prefix fallback) isolation."""
 
     backend_name = "mongodb"
 
@@ -854,39 +959,65 @@ class MongoKhataStore:
         db_name: str = "voice_khata",
         *,
         client: Any = None,
+        collection_prefix: str = "",
+        skip_ping: bool = False,
+        is_tenant: bool = False,
+        database_label: str | None = None,
     ) -> None:
         self._owns_client = client is None
         self.client = client or MongoClient(mongo_url, **_build_mongo_client_kwargs(mongo_url))
         resolved_name = _resolve_mongo_db_name(mongo_url, db_name)
-        self.database_label = resolved_name
+        self._base_db_name = resolved_name
+        self._collection_prefix = collection_prefix
+        self._is_tenant = is_tenant
+        self.database_label = database_label or resolved_name
         self.mongo_db = self.client[resolved_name]
+        self._tenant_lock = threading.Lock()
+        self._tenant_stores: dict[int, "MongoKhataStore"] = {}
         try:
-            self._ping_and_init_indexes()
+            self._ping_and_init_indexes(skip_ping=skip_ping)
         except Exception:
             self.close()
             raise
 
-    def _ping_and_init_indexes(self) -> None:
-        self.client.admin.command("ping")
-        cust_col = self.mongo_db["customers"]
-        settings_col = self.mongo_db["app_settings"]
+    def _col(self, name: str):
+        if name == "users":
+            return self.mongo_db["users"]
+        return self.mongo_db[f"{self._collection_prefix}{name}"]
+
+    def _ping_and_init_indexes(self, *, skip_ping: bool = False) -> None:
+        if not skip_ping:
+            self.client.admin.command("ping")
+        cust_col = self._col("customers")
+        settings_col = self._col("app_settings")
+        users_col = self._col("users")
         if hasattr(cust_col, "index_information") and hasattr(settings_col, "index_information"):
             try:
-                if "id_1" in cust_col.index_information() and "key_1" in settings_col.index_information():
+                has_users_idx = self._is_tenant or (
+                    hasattr(users_col, "index_information") and "email_1" in users_col.index_information()
+                )
+                if (
+                    "id_1" in cust_col.index_information()
+                    and "key_1" in settings_col.index_information()
+                    and has_users_idx
+                ):
                     return
             except Exception:
                 pass
         cust_col.create_index([("id", ASCENDING)], unique=True)
         cust_col.create_index([("normalized_name", ASCENDING)])
-        self.mongo_db["transactions"].create_index([("id", ASCENDING)], unique=True)
-        self.mongo_db["transactions"].create_index([("customer_id", ASCENDING), ("status", ASCENDING)])
-        self.mongo_db["transactions"].create_index([("transaction_date", ASCENDING), ("tx_type", ASCENDING), ("status", ASCENDING)])
-        self.mongo_db["voice_sessions"].create_index([("id", ASCENDING)], unique=True)
-        self.mongo_db["voice_logs"].create_index([("id", ASCENDING)], unique=True)
-        self.mongo_db["voice_logs"].create_index([("created_at", DESCENDING)])
-        self.mongo_db["audit_logs"].create_index([("id", ASCENDING)], unique=True)
-        self.mongo_db["audit_logs"].create_index([("transaction_id", ASCENDING), ("created_at", DESCENDING)])
+        self._col("transactions").create_index([("id", ASCENDING)], unique=True)
+        self._col("transactions").create_index([("customer_id", ASCENDING), ("status", ASCENDING)])
+        self._col("transactions").create_index([("transaction_date", ASCENDING), ("tx_type", ASCENDING), ("status", ASCENDING)])
+        self._col("voice_sessions").create_index([("id", ASCENDING)], unique=True)
+        self._col("voice_logs").create_index([("id", ASCENDING)], unique=True)
+        self._col("voice_logs").create_index([("created_at", DESCENDING)])
+        self._col("audit_logs").create_index([("id", ASCENDING)], unique=True)
+        self._col("audit_logs").create_index([("transaction_id", ASCENDING), ("created_at", DESCENDING)])
         settings_col.create_index([("key", ASCENDING)], unique=True)
+        if not self._is_tenant:
+            users_col.create_index([("id", ASCENDING)], unique=True)
+            users_col.create_index([("email", ASCENDING)], unique=True)
 
     def close(self) -> None:
         if self._owns_client and hasattr(self.client, "close"):
@@ -899,7 +1030,7 @@ class MongoKhataStore:
         yield
 
     def _next_id(self, sequence_name: str) -> int:
-        doc = self.mongo_db["counters"].find_one_and_update(
+        doc = self._col("counters").find_one_and_update(
             {"_id": sequence_name},
             {"$inc": {"seq": 1}},
             upsert=True,
@@ -912,7 +1043,7 @@ class MongoKhataStore:
         if customer_ids is not None:
             query["customer_id"] = {"$in": customer_ids}
         totals: dict[int, list[float]] = {}
-        for tx in self.mongo_db["transactions"].find(query, {"_id": 0, "customer_id": 1, "tx_type": 1, "amount": 1}):
+        for tx in self._col("transactions").find(query, {"_id": 0, "customer_id": 1, "tx_type": 1, "amount": 1}):
             cid = int(tx["customer_id"])
             bucket = totals.setdefault(cid, [0.0, 0.0])
             amt = float(tx["amount"])
@@ -925,14 +1056,14 @@ class MongoKhataStore:
     def _customer_name_map(self) -> dict[int, str]:
         return {
             int(c["id"]): c["name"]
-            for c in self.mongo_db["customers"].find({}, {"_id": 0, "id": 1, "name": 1})
+            for c in self._col("customers").find({}, {"_id": 0, "id": 1, "name": 1})
         }
 
     def count_customers(self) -> int:
-        return int(self.mongo_db["customers"].count_documents({}))
+        return int(self._col("customers").count_documents({}))
 
     def list_customers_raw(self) -> list[dict]:
-        docs = self.mongo_db["customers"].find({}, {"_id": 0}).sort("name", ASCENDING)
+        docs = self._col("customers").find({}, {"_id": 0}).sort("name", ASCENDING)
         return [_clean_doc(d) for d in docs if d is not None]
 
     def list_customer_names(self) -> list[str]:
@@ -953,7 +1084,7 @@ class MongoKhataStore:
         return docs
 
     def get_customer_by_id(self, customer_id: int) -> dict | None:
-        return _clean_doc(self.mongo_db["customers"].find_one({"id": int(customer_id)}, {"_id": 0}))
+        return _clean_doc(self._col("customers").find_one({"id": int(customer_id)}, {"_id": 0}))
 
     def get_customer_with_totals(self, customer_id: int) -> dict | None:
         doc = self.get_customer_by_id(customer_id)
@@ -986,7 +1117,7 @@ class MongoKhataStore:
             "is_synthetic": 1 if is_synthetic else 0,
             "created_at": now,
         }
-        self.mongo_db["customers"].insert_one(dict(doc))
+        self._col("customers").insert_one(dict(doc))
         doc["total_credit"] = 0.0
         doc["total_payment"] = 0.0
         return doc
@@ -1001,7 +1132,7 @@ class MongoKhataStore:
         preferred_language: str,
     ) -> dict | None:
         clean_name = name.strip()
-        res = self.mongo_db["customers"].update_one(
+        res = self._col("customers").update_one(
             {"id": int(customer_id)},
             {
                 "$set": {
@@ -1018,10 +1149,10 @@ class MongoKhataStore:
         return self.get_customer_with_totals(customer_id)
 
     def delete_customer(self, customer_id: int) -> bool:
-        res = self.mongo_db["customers"].delete_one({"id": int(customer_id)})
+        res = self._col("customers").delete_one({"id": int(customer_id)})
         if res.deleted_count == 0:
             return False
-        self.mongo_db["transactions"].delete_many({"customer_id": int(customer_id)})
+        self._col("transactions").delete_many({"customer_id": int(customer_id)})
         return True
 
     def get_customer_balance(self, customer_id: int) -> float:
@@ -1038,7 +1169,7 @@ class MongoKhataStore:
         today_payment_rows: list[dict[str, Any]] = []
         cust_totals: dict[int, list[float]] = {}
 
-        for tx in self.mongo_db["transactions"].find(
+        for tx in self._col("transactions").find(
             {"status": "confirmed"},
             {"_id": 0, "customer_id": 1, "amount": 1, "tx_type": 1, "transaction_date": 1},
         ):
@@ -1062,7 +1193,7 @@ class MongoKhataStore:
                         today_payment_rows.append({"customer_id": cid, "customer_name": cname, "amount": amt})
 
         recent_docs = (
-            self.mongo_db["transactions"]
+            self._col("transactions")
             .find({"status": "confirmed"}, {"_id": 0})
             .sort("id", DESCENDING)
             .limit(recent_limit)
@@ -1100,7 +1231,7 @@ class MongoKhataStore:
         if not cust:
             return []
         docs = (
-            self.mongo_db["transactions"]
+            self._col("transactions")
             .find({"customer_id": int(customer_id), "status": {"$ne": "voided"}}, {"_id": 0})
             .sort([("transaction_date", DESCENDING), ("id", DESCENDING)])
         )
@@ -1115,7 +1246,7 @@ class MongoKhataStore:
     def list_all_transactions(self) -> list[dict]:
         names = self._customer_name_map()
         docs = (
-            self.mongo_db["transactions"]
+            self._col("transactions")
             .find({"status": {"$ne": "voided"}}, {"_id": 0})
             .sort([("transaction_date", DESCENDING), ("id", DESCENDING)])
         )
@@ -1129,7 +1260,7 @@ class MongoKhataStore:
 
     def get_customer_recent_confirmed_transactions(self, customer_id: int, limit: int = 3) -> list[dict]:
         docs = (
-            self.mongo_db["transactions"]
+            self._col("transactions")
             .find({"customer_id": int(customer_id), "status": "confirmed"}, {"_id": 0, "amount": 1, "tx_type": 1, "transaction_date": 1})
             .sort([("transaction_date", DESCENDING), ("id", DESCENDING)])
             .limit(limit)
@@ -1141,7 +1272,7 @@ class MongoKhataStore:
         if tx_type in ("credit", "payment"):
             filt["tx_type"] = tx_type
         names = self._customer_name_map()
-        docs = self.mongo_db["transactions"].find(filt, {"_id": 0}).sort("id", DESCENDING)
+        docs = self._col("transactions").find(filt, {"_id": 0}).sort("id", DESCENDING)
         out = []
         for raw in docs:
             doc = _clean_doc(raw)
@@ -1151,7 +1282,7 @@ class MongoKhataStore:
         return out
 
     def get_date_tx_sum(self, tx_type: str, target_date: str) -> float:
-        cursor = self.mongo_db["transactions"].find(
+        cursor = self._col("transactions").find(
             {"tx_type": tx_type, "status": "confirmed", "transaction_date": target_date},
             {"_id": 0, "amount": 1},
         )
@@ -1160,7 +1291,7 @@ class MongoKhataStore:
     def get_total_outstanding(self) -> float:
         total_credit = 0.0
         total_payment = 0.0
-        for tx in self.mongo_db["transactions"].find({"status": "confirmed"}, {"_id": 0, "amount": 1, "tx_type": 1}):
+        for tx in self._col("transactions").find({"status": "confirmed"}, {"_id": 0, "amount": 1, "tx_type": 1}):
             amt = float(tx["amount"])
             if tx["tx_type"] == "credit":
                 total_credit += amt
@@ -1184,7 +1315,7 @@ class MongoKhataStore:
         return (best_name, best_bal) if best_name is not None else None
 
     def get_transaction_with_customer(self, tx_id: int) -> dict | None:
-        tx = _clean_doc(self.mongo_db["transactions"].find_one({"id": int(tx_id)}, {"_id": 0}))
+        tx = _clean_doc(self._col("transactions").find_one({"id": int(tx_id)}, {"_id": 0}))
         if not tx:
             return None
         cust = self.get_customer_by_id(int(tx["customer_id"]))
@@ -1228,7 +1359,7 @@ class MongoKhataStore:
             "created_at": now,
             "updated_at": now,
         }
-        self.mongo_db["transactions"].insert_one(dict(tx_doc))
+        self._col("transactions").insert_one(dict(tx_doc))
 
         audit_payload = audit_new_value or {
             "customer_id": int(customer_id),
@@ -1245,7 +1376,7 @@ class MongoKhataStore:
             "reason": audit_reason,
             "created_at": now,
         }
-        self.mongo_db["audit_logs"].insert_one(dict(audit_doc))
+        self._col("audit_logs").insert_one(dict(audit_doc))
 
         return {
             "id": tx_id,
@@ -1271,7 +1402,7 @@ class MongoKhataStore:
         reason: str,
         updated_at: str,
     ) -> None:
-        self.mongo_db["transactions"].update_one(
+        self._col("transactions").update_one(
             {"id": int(tx_id)},
             {"$set": {"amount": round(new_amount, 2), "tx_type": new_tx_type, "updated_at": updated_at}},
         )
@@ -1284,7 +1415,7 @@ class MongoKhataStore:
             "reason": reason,
             "created_at": updated_at,
         }
-        self.mongo_db["audit_logs"].insert_one(dict(audit_doc))
+        self._col("audit_logs").insert_one(dict(audit_doc))
 
     def export_transactions(self, customer_id: int | None = None) -> list[dict]:
         query: dict[str, Any] = {}
@@ -1292,7 +1423,7 @@ class MongoKhataStore:
             query["customer_id"] = int(customer_id)
         names = self._customer_name_map()
         docs = (
-            self.mongo_db["transactions"]
+            self._col("transactions")
             .find(query, {"_id": 0})
             .sort([("transaction_date", DESCENDING), ("id", DESCENDING)])
         )
@@ -1306,11 +1437,11 @@ class MongoKhataStore:
 
     def list_audit_logs(self, limit: int = 50) -> list[dict]:
         capped = min(max(limit, 1), 200)
-        docs = self.mongo_db["audit_logs"].find({}, {"_id": 0}).sort("id", DESCENDING).limit(capped)
+        docs = self._col("audit_logs").find({}, {"_id": 0}).sort("id", DESCENDING).limit(capped)
         return [_clean_doc(d) for d in docs if d is not None]
 
     def get_or_create_session(self, session_id: str, language: str) -> dict:
-        existing = _clean_doc(self.mongo_db["voice_sessions"].find_one({"id": session_id}, {"_id": 0}))
+        existing = _clean_doc(self._col("voice_sessions").find_one({"id": session_id}, {"_id": 0}))
         if existing:
             return existing
         now = _utc_now_iso()
@@ -1323,11 +1454,11 @@ class MongoKhataStore:
             "last_committed_tx_ids_json": None,
             "updated_at": now,
         }
-        self.mongo_db["voice_sessions"].insert_one(dict(doc))
+        self._col("voice_sessions").insert_one(dict(doc))
         return doc
 
     def get_pending_action(self, session_id: str) -> dict | None:
-        doc = self.mongo_db["voice_sessions"].find_one({"id": session_id}, {"_id": 0, "pending_action_json": 1})
+        doc = self._col("voice_sessions").find_one({"id": session_id}, {"_id": 0, "pending_action_json": 1})
         if doc and doc.get("pending_action_json"):
             return json.loads(doc["pending_action_json"])
         return None
@@ -1341,7 +1472,7 @@ class MongoKhataStore:
         last_committed_tx_ids: list[int],
         updated_at: str,
     ) -> None:
-        self.mongo_db["voice_sessions"].update_one(
+        self._col("voice_sessions").update_one(
             {"id": session_id},
             {
                 "$set": {
@@ -1379,39 +1510,39 @@ class MongoKhataStore:
             "latency_ms": int(latency_ms),
             "created_at": created_at,
         }
-        self.mongo_db["voice_logs"].insert_one(dict(doc))
+        self._col("voice_logs").insert_one(dict(doc))
         return log_id
 
     def update_voice_log_latency(self, voice_log_id: int, total_ms: int) -> None:
-        self.mongo_db["voice_logs"].update_one(
+        self._col("voice_logs").update_one(
             {"id": int(voice_log_id)},
             {"$set": {"latency_ms": max(0, int(total_ms))}},
         )
 
     def list_voice_history(self, limit: int = 40) -> list[dict]:
         capped = min(max(limit, 1), 200)
-        docs = self.mongo_db["voice_logs"].find({}, {"_id": 0}).sort("id", DESCENDING).limit(capped)
+        docs = self._col("voice_logs").find({}, {"_id": 0}).sort("id", DESCENDING).limit(capped)
         return [_clean_doc(d) for d in docs if d is not None]
 
     def ensure_default_settings(self, defaults: list[tuple[str, str]]) -> None:
         for key, value in defaults:
-            self.mongo_db["app_settings"].update_one(
+            self._col("app_settings").update_one(
                 {"key": key},
                 {"$setOnInsert": {"key": key, "value": value}},
                 upsert=True,
             )
 
     def get_all_settings(self) -> dict[str, str]:
-        docs = self.mongo_db["app_settings"].find({}, {"_id": 0, "key": 1, "value": 1})
+        docs = self._col("app_settings").find({}, {"_id": 0, "key": 1, "value": 1})
         return {d["key"]: d["value"] for d in docs}
 
     def get_setting(self, key: str, default: str) -> str:
-        doc = self.mongo_db["app_settings"].find_one({"key": key}, {"_id": 0, "value": 1})
+        doc = self._col("app_settings").find_one({"key": key}, {"_id": 0, "value": 1})
         return doc["value"] if doc else default
 
     def upsert_settings(self, updates: dict[str, str]) -> dict[str, str]:
         for k, v in updates.items():
-            self.mongo_db["app_settings"].update_one(
+            self._col("app_settings").update_one(
                 {"key": k},
                 {"$set": {"key": k, "value": v}},
                 upsert=True,
@@ -1419,14 +1550,94 @@ class MongoKhataStore:
         return self.get_all_settings()
 
     def wipe_demo_transcripts(self) -> int:
-        res = self.mongo_db["voice_logs"].delete_many({})
-        self.mongo_db["transactions"].update_many(
+        res = self._col("voice_logs").delete_many({})
+        self._col("transactions").update_many(
             {"raw_utterance_enc": {"$ne": None}},
             {"$set": {"raw_utterance_enc": None}},
         )
-        self.mongo_db["voice_sessions"].update_many(
+        self._col("voice_sessions").update_many(
             {},
             {"$set": {"pending_action_json": None, "last_committed_tx_ids_json": None}},
         )
         return int(res.deleted_count)
+
+    def get_user_by_email(self, email: str) -> dict | None:
+        clean_email = normalize_email(email)
+        return _clean_doc(self.mongo_db["users"].find_one({"email": clean_email}, {"_id": 0}))
+
+    def get_user_by_id(self, user_id: int) -> dict | None:
+        return _clean_doc(self.mongo_db["users"].find_one({"id": int(user_id)}, {"_id": 0}))
+
+    def create_user(
+        self,
+        *,
+        name: str,
+        shop_name: str,
+        email: str,
+        phone_enc: str | None,
+        password_hash: str,
+        preferred_language: str = "hi-IN",
+        created_at: str | None = None,
+    ) -> dict:
+        clean_email = normalize_email(email)
+        if self.get_user_by_email(clean_email):
+            raise ValueError("An account with this email already exists.")
+        uid = self._next_id("users")
+        now = created_at or _utc_now_iso()
+        doc = {
+            "id": uid,
+            "name": name.strip(),
+            "shop_name": shop_name.strip(),
+            "email": clean_email,
+            "phone_enc": phone_enc,
+            "password_hash": password_hash,
+            "preferred_language": preferred_language,
+            "created_at": now,
+            "last_login_at": None,
+        }
+        try:
+            self.mongo_db["users"].insert_one(dict(doc))
+        except DuplicateKeyError as exc:
+            raise ValueError("An account with this email already exists.") from exc
+        return doc
+
+    def update_user_last_login(self, user_id: int, last_login_at: str) -> None:
+        self.mongo_db["users"].update_one(
+            {"id": int(user_id)},
+            {"$set": {"last_login_at": last_login_at}},
+        )
+
+    def for_user(self, user_id: int, preferred_language: str = "hi-IN") -> "MongoKhataStore":
+        """Return an isolated MongoDB database (or prefixed collections if Atlas restricts DB creation) for user_id."""
+        if self._is_tenant:
+            return self
+        uid = int(user_id)
+        with self._tenant_lock:
+            cached = self._tenant_stores.get(uid)
+            if cached is not None:
+                return cached
+            defaults = default_tenant_settings(preferred_language)
+            suffix = f"_u{uid}"
+            max_base = max(1, 63 - len(suffix))
+            tenant_db_name = f"{self._base_db_name[:max_base]}{suffix}"
+            try:
+                store = MongoKhataStore(
+                    db_name=tenant_db_name,
+                    client=self.client,
+                    skip_ping=True,
+                    is_tenant=True,
+                )
+                store.ensure_default_settings(defaults)
+            except OperationFailure:
+                store = MongoKhataStore(
+                    db_name=self._base_db_name,
+                    client=self.client,
+                    collection_prefix=f"u{uid}_",
+                    skip_ping=True,
+                    is_tenant=True,
+                    database_label=f"{self._base_db_name} [u{uid}]",
+                )
+                store.ensure_default_settings(defaults)
+            self._tenant_stores[uid] = store
+            return store
 

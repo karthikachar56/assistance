@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 
-from app.deps import AppContainer, get_container
+from app.deps import AppContainer
+from app.routers.auth import get_scoped_container
 from app.schemas.models import SettingsUpdate
 from app.services.responsible_ai import get_ai_disclosure, wipe_demo_transcripts
 
@@ -13,7 +14,7 @@ router = APIRouter(prefix="/api", tags=["privacy-settings"])
 
 
 @router.get("/status")
-def get_system_status(container: AppContainer = Depends(get_container)) -> dict:
+def get_system_status(container: AppContainer = Depends(get_scoped_container)) -> dict:
     settings_rows = container.db.get_all_settings()
     return {
         "status": "ok",
@@ -40,12 +41,12 @@ def get_system_status(container: AppContainer = Depends(get_container)) -> dict:
 
 
 @router.get("/settings")
-def get_settings_endpoint(container: AppContainer = Depends(get_container)) -> dict:
+def get_settings_endpoint(container: AppContainer = Depends(get_scoped_container)) -> dict:
     return container.db.get_all_settings()
 
 
 @router.patch("/settings")
-def update_settings_endpoint(req: SettingsUpdate, container: AppContainer = Depends(get_container)) -> dict:
+def update_settings_endpoint(req: SettingsUpdate, container: AppContainer = Depends(get_scoped_container)) -> dict:
     updates: dict[str, str] = {}
     if req.preferred_language is not None:
         updates["preferred_language"] = req.preferred_language
@@ -62,7 +63,7 @@ def update_settings_endpoint(req: SettingsUpdate, container: AppContainer = Depe
 
 
 @router.delete("/privacy/transcripts")
-def delete_transcripts_dpdp(container: AppContainer = Depends(get_container)) -> dict:
+def delete_transcripts_dpdp(container: AppContainer = Depends(get_scoped_container)) -> dict:
     """DPDP Act compliance: delete all stored demo transcripts and session buffers immediately."""
     deleted = wipe_demo_transcripts(container.db)
     return {"deleted_voice_logs": deleted, "status": "wiped"}

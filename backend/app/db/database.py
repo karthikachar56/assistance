@@ -87,6 +87,20 @@ CREATE TABLE IF NOT EXISTS app_settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    shop_name TEXT NOT NULL DEFAULT '',
+    email TEXT NOT NULL UNIQUE,
+    phone_enc TEXT,
+    password_hash TEXT NOT NULL,
+    preferred_language TEXT NOT NULL DEFAULT 'hi-IN',
+    created_at TEXT NOT NULL,
+    last_login_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_email ON users (email);
 """
 
 

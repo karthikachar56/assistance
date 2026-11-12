@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
 from app.deps import get_container
-from app.routers import ledger, privacy, voice
+from app.routers import auth, ledger, privacy, voice
 
 
 @asynccontextmanager
@@ -34,6 +34,7 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.include_router(auth.router)
     app.include_router(voice.router)
     app.include_router(voice.ws_router)
     app.include_router(ledger.router)

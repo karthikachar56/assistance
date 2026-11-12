@@ -40,6 +40,21 @@ class AppContainer:
     gnani: GnaniSpeechAdapter
     storage_fallback_reason: str | None = None
 
+    def for_user(self, user: dict) -> "AppContainer":
+        """Return an AppContainer bound to this authenticated user's isolated khata database."""
+        uid = int(user["id"])
+        lang = str(user.get("preferred_language") or "hi-IN")
+        tenant_db = self.db.for_user(uid, preferred_language=lang)
+        return AppContainer(
+            settings=self.settings,
+            db=tenant_db,
+            cipher=self.cipher,
+            ledger=LedgerEngine(tenant_db, self.cipher),
+            gemini=self.gemini,
+            gnani=self.gnani,
+            storage_fallback_reason=self.storage_fallback_reason,
+        )
+
 
 _container: AppContainer | None = None
 _mongo_retry_after: float = 0.0

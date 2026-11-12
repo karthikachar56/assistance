@@ -352,5 +352,147 @@ def test_all_transactions_endpoint_and_ledgers_navigation(api_client):
     assert nav.json()["navigate_tab"] == "ledgers"
 
 
+def test_user_signup_login_session_and_encryption(api_client, isolated_container):
+    signup = api_client.post(
+        "/api/auth/signup",
+        json={
+            "name": "Karthik Achar",
+            "shop_name": "Achar Kirana",
+            "email": "Karthik@Example.com",
+            "phone": "+91-9876500001",
+            "password": "secret-pass-123",
+            "preferred_language": "kn-IN",
+        },
+    )
+    assert signup.status_code == 201
+    s_body = signup.json()
+    assert s_body["token_type"] == "bearer"
+    assert s_body["access_token"].startswith("vk1.")
+    assert s_body["user"]["email"] == "karthik@example.com"
+    assert s_body["user"]["shop_name"] == "Achar Kirana"
+    assert s_body["user"]["phone"] == "+91-9876500001"
+    assert "password_hash" not in s_body["user"]
+
+    raw_user = isolated_container.db.get_user_by_email("karthik@example.com")
+    assert raw_user is not None
+    assert raw_user["phone_enc"] != "+91-9876500001"
+    assert raw_user["password_hash"].startswith("scrypt$")
+    assert "secret-pass-123" not in raw_user["password_hash"]
+
+    dup = api_client.post(
+        "/api/auth/signup",
+        json={
+            "name": "Other User",
+            "email": "karthik@example.com",
+            "password": "another-password",
+        },
+    )
+    assert dup.status_code == 409
+
+    assert api_client.get("/api/auth/me").status_code == 401
+    assert api_client.get("/api/auth/me", headers={"Authorization": "Bearer vk1.bad.sig"}).status_code == 401
+    me = api_client.get("/api/auth/me", headers={"Authorization": f"Bearer {s_body['access_token']}"})
+    assert me.status_code == 200
+    assert me.json()["name"] == "Karthik Achar"
+
+    bad_login = api_client.post(
+        "/api/auth/login",
+        json={"email": "karthik@example.com", "password": "wrong-password"},
+    )
+    assert bad_login.status_code == 401
+
+    good_login = api_client.post(
+        "/api/auth/login",
+        json={"email": "KARTHIK@example.com", "password": "secret-pass-123"},
+    )
+    assert good_login.status_code == 200
+    assert good_login.json()["user"]["id"] == s_body["user"]["id"]
+    assert api_client.post("/api/auth/logout").json() == {"status": "logged_out"}
+
+
+def test_two_accounts_have_isolated_databases_and_calculations(api_client):
+    acc_a = api_client.post(
+        "/api/auth/signup",
+        json={
+            "name": "Shopkeeper One",
+            "shop_name": "One Provisions",
+            "email": "one@example.com",
+            "password": "password-one",
+            "preferred_language": "hi-IN",
+        },
+    ).json()
+    acc_b = api_client.post(
+        "/api/auth/signup",
+        json={
+            "name": "Shopkeeper Two",
+            "shop_name": "Two Supermart",
+            "email": "two@example.com",
+            "password": "password-two",
+            "preferred_language": "kn-IN",
+        },
+    ).json()
+
+    h_a = {"Authorization": f"Bearer {acc_a['access_token']}"}
+    h_b = {"Authorization": f"Bearer {acc_b['access_token']}"}
+
+    # Each account begins with a completely clean, separate database
+    st_a = api_client.get("/api/status", headers=h_a).json()
+    st_b = api_client.get("/api/status", headers=h_b).json()
+    assert st_a["database_name"] != st_b["database_name"]
+    assert st_a["settings"]["preferred_language"] == "hi-IN"
+    assert st_b["settings"]["preferred_language"] == "kn-IN"
+    assert api_client.get("/api/customers", headers=h_a).json() == []
+    assert api_client.get("/api/customers", headers=h_b).json() == []
+    assert api_client.get("/api/dashboard", headers=h_a).json()["total_outstanding"] == 0.0
+    assert api_client.get("/api/dashboard", headers=h_b).json()["total_outstanding"] == 0.0
+
+    # Account A records customers, transactions, voice history & settings
+    turn_a = api_client.post(
+        "/api/voice/turn",
+        headers=h_a,
+        json={"session_id": "sess-a", "transcript": "Vikram ka 500 udhaar", "language": "hi-IN", "include_tts": False},
+    )
+    assert turn_a.status_code == 200
+    assert turn_a.json()["status"] == "recorded"
+    api_client.patch("/api/settings", headers=h_a, json={"ai_mode": "offline"})
+
+    dash_a = api_client.get("/api/dashboard", headers=h_a).json()
+    assert dash_a["total_customers"] == 1
+    assert dash_a["total_outstanding"] == 500.0
+    assert dash_a["today_credit"] == 500.0
+    assert "Vikram" in api_client.get("/api/export/csv", headers=h_a).text
+
+    # Account B remains untouched: 0 customers, Rs 0 totals, empty voice logs, original settings
+    dash_b = api_client.get("/api/dashboard", headers=h_b).json()
+    assert dash_b["total_customers"] == 0
+    assert dash_b["total_outstanding"] == 0.0
+    assert dash_b["today_credit"] == 0.0
+    assert api_client.get("/api/customers", headers=h_b).json() == []
+    assert api_client.get("/api/voice/history", headers=h_b).json() == []
+    assert api_client.get("/api/settings", headers=h_b).json()["ai_mode"] == "cascaded"
+    assert "Vikram" not in api_client.get("/api/export/csv", headers=h_b).text
+
+    # Account B creates its own dataset and calculations independently
+    cust_b = api_client.post("/api/customers", headers=h_b, json={"name": "Anita"}).json()
+    api_client.post(
+        "/api/transactions",
+        headers=h_b,
+        json={"customer_id": cust_b["id"], "amount": 1200, "tx_type": "credit"},
+    )
+    api_client.post(
+        "/api/transactions",
+        headers=h_b,
+        json={"customer_id": cust_b["id"], "amount": 200, "tx_type": "payment"},
+    )
+    dash_b_after = api_client.get("/api/dashboard", headers=h_b).json()
+    assert dash_b_after["total_customers"] == 1
+    assert dash_b_after["total_outstanding"] == 1000.0
+    assert api_client.get("/api/dashboard", headers=h_a).json()["total_outstanding"] == 500.0
+
+    # Invalid bearer tokens are rejected on scoped routes
+    assert api_client.get("/api/customers", headers={"Authorization": "Bearer vk1.invalid.sig"}).status_code == 401
+
+
+
 
 

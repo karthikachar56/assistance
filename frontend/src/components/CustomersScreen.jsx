@@ -144,6 +144,11 @@ export function CustomersScreen({
       )}
 
       <div className="tx-list">
+        {customers.length === 0 && (
+          <div style={{ color: "var(--muted)", fontSize: "0.86rem", padding: "8px 0" }}>
+            No customers in this account yet. Click Add or use the voice assistant to create your first customer.
+          </div>
+        )}
         {customers.map((c) => {
           const isHighlighted = highlightCustomerId != null && c.id === highlightCustomerId;
           const isEditing = editingCustomerId === c.id;

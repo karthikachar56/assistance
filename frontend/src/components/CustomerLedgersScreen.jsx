@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Download, Search, UserPlus } from "lucide-react";
+import { api } from "../api/client";
 import {
   countCustomerBalanceGroups,
   filterAndSortCustomerLedgers,
@@ -127,9 +128,9 @@ export function CustomerLedgersScreen({
             </div>
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <a className="btn btn-secondary" href="/api/export/csv" style={{ textDecoration: "none" }}>
+            <button className="btn btn-secondary" type="button" onClick={() => api.exportCsv()}>
               <Download size={15} /> Export All CSV
-            </a>
+            </button>
             {onCreateCustomer && (
               <button className="btn btn-primary" type="button" onClick={() => setShowAdd((v) => !v)}>
                 <UserPlus size={15} /> Add Customer

@@ -11,6 +11,7 @@ import {
   X,
 } from "lucide-react";
 import { formatINR } from "../utils/numberNormalizer";
+import { api } from "../api/client";
 import { CustomerEditForm } from "./CustomerEditForm";
 
 /**
@@ -282,13 +283,13 @@ export function CustomerLedgerCard({
             {transactions.length === 1 ? "transaction" : "transactions"}
           </div>
         </div>
-        <a
+        <button
           className="btn btn-secondary btn-sm"
-          href={`/api/export/csv?customer_id=${customer.id}`}
-          style={{ textDecoration: "none" }}
+          type="button"
+          onClick={() => api.exportCsv(customer.id)}
         >
           <Download size={14} /> CSV
-        </a>
+        </button>
       </div>
 
       <div className="customer-block-tx-header">

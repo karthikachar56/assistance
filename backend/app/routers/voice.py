@@ -10,6 +10,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, WebSocket
 
 from app.deps import AppContainer, get_container
+from app.routers.auth import get_scoped_container, resolve_user_from_token
 from app.schemas.models import (
     LanguageCode,
     LatencyBreakdown,
@@ -65,7 +66,7 @@ def _parse_optional_json(raw: str) -> Any:
 @router.post("/turn", response_model=VoiceTurnResponse)
 def process_text_voice_turn(
     req: VoiceTurnTextRequest,
-    container: AppContainer = Depends(get_container),
+    container: AppContainer = Depends(get_scoped_container),
 ) -> VoiceTurnResponse:
     """Process a spoken transcript (from browser STT or test input) using Fast-Path + Gemini Cascade."""
     t_start = time.perf_counter()
@@ -174,7 +175,7 @@ async def process_audio_turn(
     interactive_confirm: bool = Form(False),
     pending_action_json: str = Form(""),
     last_committed_tx_ids_json: str = Form(""),
-    container: AppContainer = Depends(get_container),
+    container: AppContainer = Depends(get_scoped_container),
 ) -> VoiceTurnResponse:
     """Process raw noisy shop audio via Gnani Prisma, Gemini Multimodal, or fail-soft fast-path fallback."""
     t_start = time.perf_counter()
@@ -345,7 +346,7 @@ async def process_audio_turn(
 @router.post("/tts")
 def synthesize_tts_endpoint(
     req: TTSRequest,
-    container: AppContainer = Depends(get_container),
+    container: AppContainer = Depends(get_scoped_container),
 ) -> dict:
     b64, mime, tts_ms = _maybe_synthesize_tts(container, req.text, req.language)
     return {"audio_base64": b64, "audio_mime_type": mime, "tts_ms": tts_ms}
@@ -354,7 +355,7 @@ def synthesize_tts_endpoint(
 @router.post("/live-token")
 def create_live_ephemeral_token(
     req: LiveTokenRequest,
-    container: AppContainer = Depends(get_container),
+    container: AppContainer = Depends(get_scoped_container),
 ) -> dict:
     """Provision a short-lived ephemeral token for direct browser -> Gemini 3.8 Live WebSocket."""
     if not container.settings.has_gemini:
@@ -380,7 +381,7 @@ def create_live_ephemeral_token(
 @router.post("/live-tool", response_model=VoiceTurnResponse)
 def execute_live_tool_endpoint(
     req: LiveToolExecuteRequest,
-    container: AppContainer = Depends(get_container),
+    container: AppContainer = Depends(get_scoped_container),
 ) -> VoiceTurnResponse:
     """Execute a Gemini Live tool call against ACID SQLite/MongoDB storage over REST."""
     ephemeral = _read_setting(container, "ephemeral_transcripts", "false") == "true"
@@ -399,7 +400,7 @@ def execute_live_tool_endpoint(
 
 
 @router.get("/history")
-def get_voice_history(limit: int = 40, container: AppContainer = Depends(get_container)) -> list[dict]:
+def get_voice_history(limit: int = 40, container: AppContainer = Depends(get_scoped_container)) -> list[dict]:
     rows = container.db.list_voice_history(limit=limit)
     out = []
     for r in rows:
@@ -429,16 +430,27 @@ async def gemini_live_websocket(
     interactive_confirm: bool = False,
     greet: bool = False,
     voice: str | None = None,
+    token: str | None = None,
     container: AppContainer = Depends(get_container),
 ) -> None:
     """Real-time Gemini 3.8 Live bidirectional audio session."""
-    ephemeral = _read_setting(container, "ephemeral_transcripts", "false") == "true"
+    scoped = container
+    if token is not None and token.strip():
+        try:
+            user = resolve_user_from_token(token.strip(), container)
+        except HTTPException as exc:
+            await websocket.accept()
+            await websocket.send_json({"type": "error", "recoverable": False, "message": exc.detail})
+            await websocket.close(code=1008)
+            return
+        scoped = container.for_user(user)
+    ephemeral = _read_setting(scoped, "ephemeral_transcripts", "false") == "true"
     await run_gemini_live_bridge(
         websocket=websocket,
-        ledger=container.ledger,
+        ledger=scoped.ledger,
         session_id=session_id,
         language=language,
-        settings=container.settings,
+        settings=scoped.settings,
         resume_handle=resume_handle,
         extended_thinking=extended,
         ephemeral_transcripts=ephemeral,

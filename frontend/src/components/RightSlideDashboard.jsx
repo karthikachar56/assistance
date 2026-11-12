@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from "react";
-import { BookOpen, LayoutGrid, Settings, Users, X } from "lucide-react";
+import { BookOpen, LayoutGrid, LogOut, Settings, User, Users, X } from "lucide-react";
 
 export const NAV_SECTIONS = [
   {
@@ -31,7 +31,14 @@ export const NAV_SECTIONS = [
 /**
  * Right-side slide-over navigation drawer holding Khata, Customers, Customer Ledgers, and Settings.
  */
-export function RightSlideDashboard({ open, activeTab, onSelectTab, onClose }) {
+export function RightSlideDashboard({
+  open,
+  activeTab,
+  currentUser = null,
+  onSelectTab,
+  onLogout,
+  onClose,
+}) {
   const asideRef = useRef(null);
 
   useEffect(() => {
@@ -105,6 +112,32 @@ export function RightSlideDashboard({ open, activeTab, onSelectTab, onClose }) {
             );
           })}
         </nav>
+
+        {currentUser && (
+          <div className="nav-drawer-user">
+            <div style={{ minWidth: 0 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 700, fontSize: "0.86rem" }}>
+                <User size={15} />
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {currentUser.name}
+                </span>
+              </div>
+              <div style={{ fontSize: "0.74rem", color: "var(--muted)", overflow: "hidden", textOverflow: "ellipsis" }}>
+                {currentUser.email}
+              </div>
+            </div>
+            {onLogout && (
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={onLogout}
+                title="Sign out to login screen"
+              >
+                <LogOut size={14} /> Logout
+              </button>
+            )}
+          </div>
+        )}
 
         <div className="nav-drawer-footer">
           Tip: Tap an option above or ask the Assistant by voice to switch screens automatically.

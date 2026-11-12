@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
+import json
 import logging
 import os
 import tempfile
+import time
 from pathlib import Path
+from typing import Any
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -61,6 +65,7 @@ class FieldCipher:
                     pass
             key = _decode_or_derive_key(generated)
         self._aes = AESGCM(key)
+        self._signing_key = hashlib.sha256(b"voice-khata-auth:" + key).digest()
 
     def encrypt(self, plaintext: str | None) -> str | None:
         """Encrypt UTF-8 text into a base64 token; preserve None/empty cleanly."""
@@ -83,4 +88,63 @@ class FieldCipher:
         except InvalidTag:
             logger.warning("Failed to decrypt ciphertext token; check LEDGER_ENCRYPTION_KEY.")
             return None
+
+    def sign_token(self, payload: dict[str, Any], expires_in_seconds: int = 7 * 24 * 3600) -> str:
+        """Sign a compact HMAC-SHA256 bearer token for stateless & DB-backed sessions."""
+        now = int(time.time())
+        body = {**payload, "iat": now, "exp": now + max(60, int(expires_in_seconds))}
+        raw_json = json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        payload_b64 = base64.urlsafe_b64encode(raw_json).decode("ascii").rstrip("=")
+        sig = hmac.new(self._signing_key, payload_b64.encode("ascii"), hashlib.sha256).digest()
+        sig_b64 = base64.urlsafe_b64encode(sig).decode("ascii").rstrip("=")
+        return f"vk1.{payload_b64}.{sig_b64}"
+
+    def verify_token(self, token: str | None) -> dict[str, Any] | None:
+        """Verify HMAC signature and expiry of a bearer token; return claims or None."""
+        if not token or not isinstance(token, str):
+            return None
+        parts = token.strip().split(".")
+        if len(parts) != 3 or parts[0] != "vk1":
+            return None
+        payload_b64, sig_b64 = parts[1], parts[2]
+        expected_sig = hmac.new(self._signing_key, payload_b64.encode("ascii"), hashlib.sha256).digest()
+        expected_b64 = base64.urlsafe_b64encode(expected_sig).decode("ascii").rstrip("=")
+        if not hmac.compare_digest(sig_b64, expected_b64):
+            return None
+        try:
+            padded = payload_b64 + "=" * (-len(payload_b64) % 4)
+            claims = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+        except Exception:
+            return None
+        if not isinstance(claims, dict) or int(claims.get("exp", 0)) < int(time.time()):
+            return None
+        return claims
+
+
+def hash_password(password: str) -> str:
+    """Hash a password with a per-user random salt using scrypt."""
+    salt = os.urandom(16)
+    dk = hashlib.scrypt(password.encode("utf-8"), salt=salt, n=16384, r=8, p=1, dklen=32)
+    return (
+        "scrypt$"
+        + base64.urlsafe_b64encode(salt).decode("ascii")
+        + "$"
+        + base64.urlsafe_b64encode(dk).decode("ascii")
+    )
+
+
+def verify_password(password: str, stored_hash: str) -> bool:
+    """Constant-time verification against a stored scrypt hash."""
+    if not password or not stored_hash:
+        return False
+    parts = stored_hash.split("$", 2)
+    if len(parts) != 3 or parts[0] != "scrypt":
+        return False
+    try:
+        salt = base64.urlsafe_b64decode(parts[1].encode("ascii"))
+        expected = base64.urlsafe_b64decode(parts[2].encode("ascii"))
+        actual = hashlib.scrypt(password.encode("utf-8"), salt=salt, n=16384, r=8, p=1, dklen=len(expected))
+    except Exception:
+        return False
+    return hmac.compare_digest(actual, expected)
 

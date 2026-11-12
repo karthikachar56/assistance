@@ -1,5 +1,5 @@
 import React from "react";
-import { Lock, Trash2 } from "lucide-react";
+import { Lock, LogOut, Trash2, User } from "lucide-react";
 
 const LANGUAGES = [
   { code: "hi-IN", label: "Hindi / Hinglish (hi-IN)" },
@@ -10,6 +10,8 @@ const LANGUAGES = [
 ];
 
 export function SettingsScreen({
+  currentUser,
+  onLogout,
   statusInfo,
   language,
   aiMode,
@@ -29,6 +31,30 @@ export function SettingsScreen({
 }) {
   return (
     <div style={{ display: "grid", gap: 14 }}>
+      {currentUser && (
+        <div className="card">
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+            <div>
+              <h3 style={{ margin: "0 0 4px", display: "flex", alignItems: "center", gap: 6 }}>
+                <User size={17} /> Signed-In Shopkeeper Account
+              </h3>
+              <div style={{ fontSize: "0.86rem", fontWeight: 700 }}>
+                {currentUser.name} · {currentUser.shop_name}
+              </div>
+              <div style={{ fontSize: "0.8rem", color: "var(--muted)", marginTop: 2 }}>
+                {currentUser.email}
+                {currentUser.phone ? ` · Phone: ${currentUser.phone}` : ""}
+              </div>
+            </div>
+            {onLogout && (
+              <button className="btn btn-secondary" type="button" onClick={onLogout}>
+                <LogOut size={15} /> Sign Out
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
       <div className="card">
         <h3 style={{ marginTop: 0 }}>Language &amp; Gemini AI Engine</h3>
         <div style={{ display: "grid", gap: 12 }}>

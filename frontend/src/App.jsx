@@ -1,9 +1,18 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Mic, MicOff, PanelRightOpen, Radio, Send } from "lucide-react";
-import { api, enqueueOfflineTurn, flushOfflineQueue, getOfflineQueue } from "./api/client";
+import { LogOut, Mic, MicOff, PanelRightOpen, Radio, Send, User } from "lucide-react";
+import {
+  api,
+  clearAuthToken,
+  enqueueOfflineTurn,
+  flushOfflineQueue,
+  getAuthToken,
+  getOfflineQueue,
+  setAuthToken,
+} from "./api/client";
 import { EphemeralGeminiLiveClient } from "./audio/ephemeralLiveClient";
 import { GeminiLiveClient } from "./audio/liveClient";
 import { ShopAudioRecorder, playReplyAudio } from "./audio/recorder";
+import { AuthGateway } from "./components/AuthPages";
 import { ConsentBanner } from "./components/ConsentBanner";
 import { CustomerLedgerModal } from "./components/CustomerLedgerModal";
 import { CustomerLedgersScreen } from "./components/CustomerLedgersScreen";
@@ -12,11 +21,26 @@ import { DashboardScreen } from "./components/DashboardScreen";
 import { JarvisHud } from "./components/JarvisHud";
 import { NAV_SECTIONS, RightSlideDashboard } from "./components/RightSlideDashboard";
 import { SettingsScreen } from "./components/SettingsScreen";
+import { resolveInitialAuthMode } from "./utils/authHelpers";
 import { previewSpokenAmount } from "./utils/numberNormalizer";
 import { inferNavigationFromText } from "./utils/voiceNavigator";
 
+function newSessionId() {
+  return `khata-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 export default function App() {
-  const [sessionId] = useState(() => `khata-${Math.random().toString(36).slice(2, 8)}`);
+  const [sessionId, setSessionId] = useState(newSessionId);
+  const [currentUser, setCurrentUser] = useState(null);
+  const [authMode, setAuthMode] = useState(() =>
+    typeof window !== "undefined"
+      ? resolveInitialAuthMode(window.location.pathname, window.location.hash)
+      : "login"
+  );
+  const [authChecking, setAuthChecking] = useState(() => Boolean(getAuthToken()));
+  const [authSubmitting, setAuthSubmitting] = useState(false);
+  const [authError, setAuthError] = useState("");
+
   const [tab, setTab] = useState("home");
   const [drawerOpen, setDrawerOpen] = useState(false);
 
@@ -167,6 +191,15 @@ export default function App() {
       setErrorMsg("");
       return { custs };
     } catch (err) {
+      if (err?.status === 401) {
+        clearAuthToken();
+        currentUserRef.current = null;
+        setCurrentUser(null);
+        resetWorkspaceState();
+        setAuthMode("login");
+        setAuthError("Your session expired. Please sign in again.");
+        return null;
+      }
       const isLocalHost =
         window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
       setErrorMsg(
@@ -178,11 +211,78 @@ export default function App() {
     }
   }
 
+  function resetWorkspaceState(nextUserId = null) {
+    setSessionId(newSessionId());
+    setDashboard(null);
+    setCustomers([]);
+    setAllTransactions([]);
+    customersRef.current = [];
+    setSelectedCustomer(null);
+    setSelectedCustomerTxs([]);
+    selectedCustomerIdRef.current = null;
+    setLastTurn(null);
+    lastTurnRef.current = null;
+    setConversationFeed([]);
+    setLiveHighlightTxIds([]);
+    setLiveHighlightCustId(null);
+    setFocusLedgersCustId(null);
+    setLiveUserText("");
+    setLiveTranscriptNote("");
+    setTab("home");
+    setDrawerOpen(false);
+    hasLoadedPrimarySettingsRef.current = false;
+    initializedAudioPrefRef.current = false;
+    setOfflineCount(nextUserId != null ? getOfflineQueue(nextUserId).length : 0);
+  }
+
+  const currentUserRef = useRef(null);
+  currentUserRef.current = currentUser;
+
   useEffect(() => {
-    refreshAll();
+    let active = true;
+
+    async function bootstrapSession() {
+      const token = getAuthToken();
+      if (!token) {
+        try {
+          const st = await api.status();
+          if (active) setStatusInfo(st);
+        } catch {
+          // ignore offline error on auth screen
+        }
+        return;
+      }
+      try {
+        const me = await api.authMe();
+        if (!active) return;
+        currentUserRef.current = me;
+        setCurrentUser(me);
+        setOfflineCount(getOfflineQueue(me?.id).length);
+        await refreshAll();
+      } catch {
+        clearAuthToken();
+        if (!active) return;
+        currentUserRef.current = null;
+        setCurrentUser(null);
+        setOfflineCount(0);
+        try {
+          const st = await api.status();
+          if (active) setStatusInfo(st);
+        } catch {
+          // ignore offline error on auth screen
+        }
+      } finally {
+        if (active) setAuthChecking(false);
+      }
+    }
+
+    bootstrapSession();
+
     const onOnline = async () => {
       setOnline(true);
-      const res = await flushOfflineQueue();
+      const uid = currentUserRef.current?.id;
+      if (uid == null) return;
+      const res = await flushOfflineQueue(uid);
       setOfflineCount(res.remaining);
       if (res.flushed > 0) refreshAll();
     };
@@ -190,12 +290,87 @@ export default function App() {
     window.addEventListener("online", onOnline);
     window.addEventListener("offline", onOffline);
     return () => {
+      active = false;
       window.removeEventListener("online", onOnline);
       window.removeEventListener("offline", onOffline);
       if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
       liveClientRef.current?.stop();
     };
   }, []);
+
+  function switchAuthMode(nextMode) {
+    setAuthMode(nextMode);
+    setAuthError("");
+    if (typeof window !== "undefined") {
+      window.history.replaceState(null, "", nextMode === "signup" ? "#/signup" : "#/login");
+    }
+  }
+
+  async function completeAuthSuccess(res, preferredLanguage = null) {
+    stopLiveSession();
+    clearPttSilenceTimer();
+    resetWorkspaceState(res.user?.id);
+    setAuthToken(res.access_token);
+    currentUserRef.current = res.user;
+    setCurrentUser(res.user);
+    if (preferredLanguage) {
+      setLanguage(preferredLanguage);
+      try {
+        await api.updateSettings({ preferred_language: preferredLanguage });
+      } catch {
+        // non-fatal if settings update fails
+      }
+    }
+    if (typeof window !== "undefined" && (window.location.hash === "#/login" || window.location.hash === "#/signup" || window.location.pathname === "/login" || window.location.pathname === "/signup")) {
+      window.history.replaceState(null, "", "/");
+    }
+    await refreshAll();
+  }
+
+  async function handleLogin(payload) {
+    setAuthSubmitting(true);
+    setAuthError("");
+    try {
+      const res = await api.authLogin(payload);
+      await completeAuthSuccess(res);
+    } catch (err) {
+      setAuthError(err.message || "Unable to sign in.");
+    } finally {
+      setAuthSubmitting(false);
+    }
+  }
+
+  async function handleSignUp(payload) {
+    setAuthSubmitting(true);
+    setAuthError("");
+    try {
+      const res = await api.authSignup(payload);
+      await completeAuthSuccess(res, res.user?.preferred_language || payload.preferred_language);
+    } catch (err) {
+      setAuthError(err.message || "Unable to create account.");
+    } finally {
+      setAuthSubmitting(false);
+    }
+  }
+
+  async function handleLogout() {
+    stopLiveSession();
+    clearPttSilenceTimer();
+    try {
+      await api.authLogout();
+    } catch {
+      // ignore offline logout failure
+    }
+    clearAuthToken();
+    currentUserRef.current = null;
+    setCurrentUser(null);
+    setAuthMode("login");
+    setAuthError("");
+    resetWorkspaceState(null);
+    if (typeof window !== "undefined") {
+      window.history.replaceState(null, "", "#/login");
+    }
+  }
 
   function stopLiveSession() {
     liveClientRef.current?.stop();
@@ -305,7 +480,7 @@ export default function App() {
       await applyTurnUiEffects(res, clean);
     } catch (err) {
       if (!navigator.onLine) {
-        const q = enqueueOfflineTurn(payload);
+        const q = enqueueOfflineTurn(payload, currentUserRef.current?.id);
         setOfflineCount(q.length);
         setErrorMsg("Offline: voice transaction queued locally for auto-sync.");
       } else {
@@ -645,6 +820,33 @@ export default function App() {
   const detectedPreview = previewSpokenAmount(textDraft);
   const activeNavSection = NAV_SECTIONS.find((sec) => sec.id === tab) || NAV_SECTIONS[0];
 
+  if (authChecking) {
+    return (
+      <div className="auth-loading-shell">
+        <div className="card" style={{ textAlign: "center", padding: "24px 28px" }}>
+          <div className="brand-mark" style={{ margin: "0 auto 12px" }}>
+            ₹
+          </div>
+          <div style={{ fontWeight: 700 }}>Checking your Voice Khata session...</div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!currentUser) {
+    return (
+      <AuthGateway
+        mode={authMode}
+        onChangeMode={switchAuthMode}
+        onLogin={handleLogin}
+        onSignUp={handleSignUp}
+        loading={authSubmitting}
+        error={authError}
+        statusInfo={statusInfo}
+      />
+    );
+  }
+
   return (
     <div className="split-shell">
       <aside className="ai-pane" aria-label="Voice Khata AI Assistant">
@@ -748,11 +950,15 @@ export default function App() {
           <div className="brand">
             <div className="brand-mark">₹</div>
             <div>
-              <h1>Voice Khata</h1>
-              <small>Kirana AI Digital Accountant · Gemini 3.8 / 4 Argon</small>
+              <h1>{currentUser?.shop_name || "Voice Khata"}</h1>
+              <small>Voice Khata · Kirana AI Digital Accountant</small>
             </div>
           </div>
           <div className="topbar-right">
+            <div className="topbar-user-pill" title={currentUser?.email || ""}>
+              <User size={14} />
+              <span>{currentUser?.name || "Shopkeeper"}</span>
+            </div>
             <button
               type="button"
               className={`nav-drawer-trigger ${drawerOpen ? "open" : ""}`}
@@ -764,6 +970,16 @@ export default function App() {
               <PanelRightOpen size={16} />
               <span>Dashboard</span>
               <span className="nav-trigger-badge">{activeNavSection.label}</span>
+            </button>
+            <button
+              type="button"
+              className="nav-drawer-trigger"
+              onClick={handleLogout}
+              aria-label="Logout"
+              title="Sign out"
+            >
+              <LogOut size={14} />
+              <span>Logout</span>
             </button>
           </div>
         </header>
@@ -861,6 +1077,8 @@ export default function App() {
 
         {tab === "settings" && (
           <SettingsScreen
+            currentUser={currentUser}
+            onLogout={handleLogout}
             statusInfo={statusInfo}
             language={language}
             aiMode={aiMode}
@@ -899,7 +1117,9 @@ export default function App() {
       <RightSlideDashboard
         open={drawerOpen}
         activeTab={tab}
+        currentUser={currentUser}
         onSelectTab={navigateToTab}
+        onLogout={handleLogout}
         onClose={() => setDrawerOpen(false)}
       />
     </div>

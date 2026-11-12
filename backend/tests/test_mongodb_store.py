@@ -346,6 +346,20 @@ def test_mongo_store_end_to_end_ledger_encryption_and_api():
 
             dash = client.get("/api/dashboard").json()
             assert dash["total_customers"] == 7
+            su = client.post(
+                "/api/auth/signup",
+                json={
+                    "name": "Meera Nair",
+                    "shop_name": "Nair Provisions",
+                    "email": "meera@example.com",
+                    "phone": "+91-9777777777",
+                    "password": "strong-password",
+                },
+            )
+            assert su.status_code == 201
+            token = su.json()["access_token"]
+            assert client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"}).status_code == 200
+            assert client.post("/api/auth/login", json={"email": "meera@example.com", "password": "strong-password"}).status_code == 200
             assert len(client.get("/api/audit").json()) >= 10
             assert client.patch("/api/settings", json={"ephemeral_transcripts": True}).json()["ephemeral_transcripts"] == "true"
             assert "Kiran Shetty" in client.get("/api/export/csv").text
@@ -427,3 +441,72 @@ def test_build_container_falls_back_to_sqlite_when_mongo_fails(tmp_path, monkeyp
     finally:
         if hasattr(container.db, "close"):
             container.db.close()
+
+
+def test_mongo_multi_account_database_and_collection_fallback_isolation():
+    from pymongo.errors import OperationFailure
+
+    fake_client = _FakeMongoClient()
+    store = MongoKhataStore(mongo_url="mongodb://localhost:27017", db_name="mongo_multi", client=fake_client)
+    cipher = FieldCipher("mongo-multi-tenant-secret")
+    settings = Settings(
+        gemini_api_key="",
+        gnani_api_key="",
+        ledger_encryption_key="mongo-multi-tenant-secret",
+        mongodb_url="mongodb://localhost:27017/mongo_multi",
+        mongodb_db_name="mongo_multi",
+    )
+    container = AppContainer(
+        settings=settings,
+        db=store,
+        cipher=cipher,
+        ledger=LedgerEngine(store, cipher),
+        gemini=GeminiKhataEngine(settings),
+        gnani=GnaniSpeechAdapter(settings),
+    )
+
+    set_container(container)
+    try:
+        app = create_app()
+        with TestClient(app) as client:
+            u1 = client.post(
+                "/api/auth/signup",
+                json={"name": "Owner One", "email": "u1@example.com", "password": "pass-user-1"},
+            ).json()
+            u2 = client.post(
+                "/api/auth/signup",
+                json={"name": "Owner Two", "email": "u2@example.com", "password": "pass-user-2"},
+            ).json()
+            h1 = {"Authorization": f"Bearer {u1['access_token']}"}
+            h2 = {"Authorization": f"Bearer {u2['access_token']}"}
+
+            assert f"mongo_multi_u{u1['user']['id']}" in fake_client._dbs
+            assert f"mongo_multi_u{u2['user']['id']}" in fake_client._dbs
+
+            c1 = client.post("/api/customers", headers=h1, json={"name": "Kiran"}).json()
+            c2 = client.post("/api/customers", headers=h2, json={"name": "Kiran"}).json()
+            client.post("/api/transactions", headers=h1, json={"customer_id": c1["id"], "amount": 400, "tx_type": "credit"})
+            client.post("/api/transactions", headers=h2, json={"customer_id": c2["id"], "amount": 900, "tx_type": "credit"})
+            client.post("/api/transactions", headers=h2, json={"customer_id": c2["id"], "amount": 150, "tx_type": "payment"})
+
+            assert client.get("/api/dashboard", headers=h1).json()["total_outstanding"] == 400.0
+            assert client.get("/api/dashboard", headers=h2).json()["total_outstanding"] == 750.0
+    finally:
+        set_container(None)
+
+    # Also verify collection-prefix isolation when secondary Mongo DB creation is restricted
+    class _RestrictedMongoClient(_FakeMongoClient):
+        def __getitem__(self, name: str) -> _FakeMongoDB:
+            if "_u" in name:
+                raise OperationFailure("not authorized on secondary db")
+            return super().__getitem__(name)
+
+    restricted_client = _RestrictedMongoClient()
+    r_store = MongoKhataStore(mongo_url="mongodb://localhost:27017", db_name="mongo_restricted", client=restricted_client)
+    t1 = r_store.for_user(1, preferred_language="hi-IN")
+    t2 = r_store.for_user(2, preferred_language="kn-IN")
+    assert t1.database_label == "mongo_restricted [u1]"
+    assert t2.database_label == "mongo_restricted [u2]"
+    t1.create_customer(name="Alpha", phone_enc=None, reminder_opt_in=False, preferred_language="hi-IN")
+    assert t1.count_customers() == 1
+    assert t2.count_customers() == 0
