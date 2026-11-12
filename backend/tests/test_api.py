@@ -51,13 +51,14 @@ def test_dpdp_wipe_and_csv_export(api_client):
 
 
 def test_vercel_serverless_entrypoint_and_readonly_safety(monkeypatch, tmp_path, api_client):
-    import importlib.util
+    import importlib
     import tempfile
     from pathlib import Path
 
     from fastapi.testclient import TestClient
 
-    from app.config import ROOT_DIR, Settings
+    from app import main as main_mod
+    from app.config import Settings
     from app.db import crypto as crypto_mod
 
     monkeypatch.setenv("VERCEL", "1")
@@ -72,13 +73,9 @@ def test_vercel_serverless_entrypoint_and_readonly_safety(monkeypatch, tmp_path,
     foreign_cipher_token = cipher_other.encrypt("+91-9876543210")
     assert cipher_vercel.decrypt(foreign_cipher_token) is None
 
-    # Verify root api/index.py loads FastAPI cleanly and reports live_ws_supported=False on Vercel
-    spec = importlib.util.spec_from_file_location("vercel_api_index", ROOT_DIR / "api" / "index.py")
-    assert spec is not None and spec.loader is not None
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-
-    with TestClient(mod.app) as client:
+    # Verify backend/app/main.py loads FastAPI cleanly and reports live_ws_supported=False on Vercel
+    reloaded = importlib.reload(main_mod)
+    with TestClient(reloaded.app) as client:
         assert client.get("/health").json() == {"status": "healthy"}
         status_body = client.get("/api/status").json()
         assert status_body["status"] == "ok"

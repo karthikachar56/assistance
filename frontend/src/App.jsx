@@ -127,7 +127,13 @@ export default function App() {
       setErrorMsg("");
       return { custs };
     } catch (err) {
-      setErrorMsg(`Backend unreachable (${err.message}). Start FastAPI on port 8000.`);
+      const isLocalHost =
+        window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
+      setErrorMsg(
+        isLocalHost
+          ? `Backend unreachable (${err.message}). Start FastAPI on port 8000.`
+          : `Backend service unavailable (${err.message}).`
+      );
       return null;
     }
   }
