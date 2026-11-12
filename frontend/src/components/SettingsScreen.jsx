@@ -17,6 +17,7 @@ export function SettingsScreen({
   ephemeral,
   useDirectAudio,
   useLiveStream,
+  liveWsSupported = true,
   interactiveConfirm,
   onUpdateSetting,
   onToggleDirectAudio,
@@ -83,12 +84,13 @@ export function SettingsScreen({
           <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: "0.86rem" }}>
             <input
               type="checkbox"
-              checked={useLiveStream}
-              disabled={statusInfo?.live_ws_supported === false}
+              checked={useLiveStream && liveWsSupported}
+              disabled={!liveWsSupported || statusInfo?.live_ws_supported === false}
               onChange={(e) => onToggleLiveStream(e.target.checked)}
             />
             Enable Real-Time Assistant Gemini 3.8 Live Voice Mode (/ws/live)
-            {statusInfo?.live_ws_supported === false && " (unavailable on serverless; using Push-to-Talk + Cloud REST)"}
+            {(!liveWsSupported || statusInfo?.live_ws_supported === false) &&
+              " (unavailable on serverless; using Push-to-Talk + Cloud REST)"}
           </label>
 
           <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: "0.86rem" }}>
@@ -117,6 +119,21 @@ export function SettingsScreen({
           <strong>{statusInfo?.gemini_configured ? "Connected" : "Offline/Fallback"}</strong> · Gnani API:{" "}
           <strong>{statusInfo?.gnani_configured ? "Connected" : "Adapter Ready"}</strong>
         </div>
+        {statusInfo?.storage_fallback_reason && (
+          <div
+            style={{
+              fontSize: "0.8rem",
+              color: "#92400e",
+              background: "#fef3c7",
+              border: "1px solid #f59e0b",
+              borderRadius: 8,
+              padding: "8px 10px",
+              marginBottom: 12,
+            }}
+          >
+            {statusInfo.storage_fallback_reason}
+          </div>
+        )}
 
         <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: "0.86rem", marginBottom: 14 }}>
           <input

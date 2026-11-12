@@ -64,22 +64,28 @@ class Settings(BaseSettings):
 
     @property
     def has_mongo(self) -> bool:
-        return bool(self.mongodb_url.strip())
+        return bool(self.mongodb_url.strip().strip('"').strip("'"))
 
     @property
     def has_gemini(self) -> bool:
-        key = self.gemini_api_key.strip()
+        key = self.gemini_api_key.strip().strip('"').strip("'")
         return bool(key and key != "your_gemini_api_key_here")
 
     @property
     def has_gnani(self) -> bool:
-        return bool(self.gnani_api_key.strip())
+        return bool(self.gnani_api_key.strip().strip('"').strip("'"))
+
+    @property
+    def is_serverless(self) -> bool:
+        return any(
+            os.environ.get(var) for var in ("VERCEL", "VERCEL_ENV", "VERCEL_URL", "AWS_LAMBDA_FUNCTION_NAME")
+        )
 
     @property
     def resolved_database_path(self) -> str:
         p = Path(self.database_path)
         resolved = p if p.is_absolute() else (ROOT_DIR / p)
-        if os.environ.get("VERCEL") and not str(resolved).startswith(tempfile.gettempdir()):
+        if self.is_serverless and not str(resolved).startswith(tempfile.gettempdir()):
             return str(Path(tempfile.gettempdir()) / resolved.name)
         return str(resolved)
 

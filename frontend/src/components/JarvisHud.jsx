@@ -29,7 +29,8 @@ export function JarvisHud({
   const isListening = liveConnected || isRecording;
   const awaitingCustName =
     lastTurn?.status === "needs_confirmation" && lastTurn?.pending_action?.kind === "create_customer";
-  const awaitingConfirm = lastTurn?.status === "needs_confirmation" && !awaitingCustName;
+  const awaitingConfirm =
+    lastTurn?.status === "needs_confirmation" && !awaitingCustName && Boolean(lastTurn?.pending_action);
   const awaitingDisambig = lastTurn?.status === "needs_disambiguation";
 
   let statusLabel = "STANDBY · TAP TO SPEAK";
@@ -83,8 +84,10 @@ export function JarvisHud({
               )}
             </div>
             <div className="jarvis-subtitle">
-              {useLiveStream
+              {useLiveStream && liveWsSupported
                 ? "Real-time voice + live transcript"
+                : !liveWsSupported
+                ? "Push-to-Talk Voice · Cloud Audio & Instant Browser STT"
                 : "Instant Browser STT + Resilient Cloud Audio Fallback"}
             </div>
           </div>
@@ -196,7 +199,12 @@ export function JarvisHud({
       {awaitingCustName && (
         <div className="jarvis-action-bar">
           <span className="jarvis-action-prompt">Speak or type the new customer&rsquo;s name below:</span>
-          <button type="button" className="jarvis-confirm-no" onClick={() => onQuickReply("No, cancel")}>
+          <button
+            type="button"
+            className="jarvis-confirm-no"
+            disabled={isProcessing}
+            onClick={() => onQuickReply("No, cancel")}
+          >
             <X size={14} /> Cancel
           </button>
         </div>
@@ -206,10 +214,20 @@ export function JarvisHud({
         <div className="jarvis-action-bar">
           <span className="jarvis-action-prompt">Say &ldquo;Yes, sir&rdquo;, &ldquo;No, 430&rdquo;, or tap:</span>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <button type="button" className="jarvis-confirm-yes" onClick={() => onQuickReply("Yes, confirm")}>
+            <button
+              type="button"
+              className="jarvis-confirm-yes"
+              disabled={isProcessing}
+              onClick={() => onQuickReply("Yes, confirm")}
+            >
               <Check size={14} /> Yes, Confirm &amp; Save
             </button>
-            <button type="button" className="jarvis-confirm-no" onClick={() => onQuickReply("No, cancel")}>
+            <button
+              type="button"
+              className="jarvis-confirm-no"
+              disabled={isProcessing}
+              onClick={() => onQuickReply("No, cancel")}
+            >
               <X size={14} /> Cancel
             </button>
           </div>
@@ -221,7 +239,13 @@ export function JarvisHud({
           <span className="jarvis-action-prompt">Specify customer:</span>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             {lastTurn.candidate_customers.map((name) => (
-              <button key={name} type="button" className="jarvis-confirm-yes" onClick={() => onQuickReply(name)}>
+              <button
+                key={name}
+                type="button"
+                className="jarvis-confirm-yes"
+                disabled={isProcessing}
+                onClick={() => onQuickReply(name)}
+              >
                 {name}
               </button>
             ))}

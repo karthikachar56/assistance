@@ -141,6 +141,8 @@ class VoiceTurnTextRequest(BaseModel):
     ai_mode: Literal["cascaded", "flash", "argon", "carbon", "offline"] | None = None
     include_tts: bool = False
     interactive_confirm: bool = False
+    pending_action: dict | None = None
+    last_committed_tx_ids: list[int] | None = None
 
 
 class LatencyBreakdown(BaseModel):

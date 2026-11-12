@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, WebSocket
 
@@ -50,6 +51,15 @@ def _maybe_synthesize_tts(
     return None, None, 0
 
 
+def _parse_optional_json(raw: str) -> Any:
+    if not raw or not raw.strip():
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
 @router.post("/turn", response_model=VoiceTurnResponse)
 def process_text_voice_turn(
     req: VoiceTurnTextRequest,
@@ -60,14 +70,24 @@ def process_text_voice_turn(
     ai_mode = req.ai_mode or _read_setting(container, "ai_mode", container.settings.ai_mode)
     ephemeral = _read_setting(container, "ephemeral_transcripts", "false") == "true"
 
-    pending = container.ledger.get_pending_action(req.session_id)
+    server_pending = container.ledger.get_pending_action(req.session_id)
+    pending = server_pending if server_pending is not None else req.pending_action
     known_names = container.ledger.list_customer_names()
 
     t_fp0 = time.perf_counter()
+    fp_candidate = try_fast_path(req.transcript, req.language, pending, known_names)
     plan: VoiceTurnPlan | None = None
     model_used = "deterministic-fast-path"
     if ai_mode not in ("argon", "carbon"):
-        plan = try_fast_path(req.transcript, req.language, pending, known_names)
+        plan = fp_candidate
+    elif fp_candidate is not None and fp_candidate.intent in (
+        "confirmation_reply",
+        "disambiguation_reply",
+        "delete_customer_blocked",
+        "greeting",
+    ):
+        # Always honor deterministic UI confirm/cancel/disambiguation/safety replies instantly
+        plan = fp_candidate
     fast_path_ms = int((time.perf_counter() - t_fp0) * 1000)
 
     ai_ms = 0
@@ -83,8 +103,11 @@ def process_text_voice_turn(
                     transcript=req.transcript,
                 )
                 plan = verify_and_guard_plan(plan)
+                if plan.intent == "unknown" and fp_candidate is not None:
+                    plan = fp_candidate
+                    model_used = f"{model_used} -> fast-path-rescue"
             except Exception as exc:
-                plan = try_fast_path(req.transcript, req.language, pending, known_names) or VoiceTurnPlan(
+                plan = fp_candidate or VoiceTurnPlan(
                     transcript=req.transcript,
                     intent="unknown",
                     confidence=0.3,
@@ -95,7 +118,7 @@ def process_text_voice_turn(
             ai_ms = int((time.perf_counter() - t_ai0) * 1000)
         else:
             # Local deterministic fallback when offline or no GEMINI_API_KEY is configured yet
-            plan = try_fast_path(req.transcript, req.language, pending, known_names) or VoiceTurnPlan(
+            plan = fp_candidate or VoiceTurnPlan(
                 transcript=req.transcript,
                 intent="unknown",
                 confidence=0.3,
@@ -114,6 +137,8 @@ def process_text_voice_turn(
         ephemeral_transcripts=ephemeral,
         channel="voice_text",
         interactive_confirm=req.interactive_confirm,
+        fallback_pending_action=req.pending_action,
+        fallback_last_tx_ids=req.last_committed_tx_ids,
     )
     ledger_ms = int((time.perf_counter() - t_led0) * 1000)
 
@@ -145,6 +170,8 @@ async def process_audio_turn(
     include_tts: bool = Form(True),
     fallback_transcript: str = Form(""),
     interactive_confirm: bool = Form(False),
+    pending_action_json: str = Form(""),
+    last_committed_tx_ids_json: str = Form(""),
     container: AppContainer = Depends(get_container),
 ) -> VoiceTurnResponse:
     """Process raw noisy shop audio via Gnani Prisma, Gemini Multimodal, or fail-soft fast-path fallback."""
@@ -158,7 +185,17 @@ async def process_audio_turn(
     provider = _read_setting(container, "speech_provider", container.settings.speech_provider)
     ephemeral = _read_setting(container, "ephemeral_transcripts", "false") == "true"
 
-    pending = container.ledger.get_pending_action(session_id)
+    parsed_pending = _parse_optional_json(pending_action_json)
+    fallback_pending = parsed_pending if isinstance(parsed_pending, dict) else None
+    parsed_tx_ids = _parse_optional_json(last_committed_tx_ids_json)
+    fallback_tx_ids = (
+        [int(x) for x in parsed_tx_ids if isinstance(x, (int, float))]
+        if isinstance(parsed_tx_ids, list)
+        else None
+    )
+
+    server_pending = container.ledger.get_pending_action(session_id)
+    pending = server_pending if server_pending is not None else fallback_pending
     known_names = container.ledger.list_customer_names()
 
     stt_ms = 0
@@ -169,9 +206,12 @@ async def process_audio_turn(
 
     # Path 0: Sub-20ms hybrid boost when Push-to-Talk also captured a clear browser transcript
     clean_fallback = fallback_transcript.strip()
+    fp_fallback_plan = (
+        try_fast_path(clean_fallback, language, pending, known_names) if clean_fallback else None
+    )
     if clean_fallback and ai_mode in ("cascaded", "flash"):
         t_fp0 = time.perf_counter()
-        fp_plan = try_fast_path(clean_fallback, language, pending, known_names)
+        fp_plan = fp_fallback_plan
         fast_path_ms = int((time.perf_counter() - t_fp0) * 1000)
         if fp_plan is not None and fp_plan.confidence >= 0.90:
             plan = fp_plan
@@ -223,11 +263,13 @@ async def process_audio_turn(
                     audio_mime_type=mime_type,
                 )
                 plan = verify_and_guard_plan(plan)
+                if plan.intent == "unknown" and fp_fallback_plan is not None:
+                    plan = fp_fallback_plan
+                    model_used = f"{model_used} -> browser-stt-rescue"
             except Exception as exc:
-                clean_fallback = fallback_transcript.strip()
                 t_fp0 = time.perf_counter()
-                if clean_fallback:
-                    plan = try_fast_path(clean_fallback, language, pending, known_names)
+                if fp_fallback_plan is not None:
+                    plan = fp_fallback_plan
                 fast_path_ms = int((time.perf_counter() - t_fp0) * 1000)
                 if plan is not None:
                     model_used = f"browser-stt + fast-path ({type(exc).__name__} fallback)"
@@ -238,15 +280,14 @@ async def process_audio_turn(
                         confidence=0.25,
                         detected_language=language,
                         clarification_question=(
-                            f"Temporary cloud spike ({type(exc).__name__}). Please repeat clearly or switch to Live Voice Mode."
+                            f"Temporary cloud spike ({type(exc).__name__}). Please repeat clearly or type below."
                         ),
                     )
                     model_used = f"cloud-fallback ({type(exc).__name__})"
             ai_ms = int((time.perf_counter() - t_ai0) * 1000)
-        elif fallback_transcript.strip():
+        elif clean_fallback:
             t_fp0 = time.perf_counter()
-            clean_fallback = fallback_transcript.strip()
-            plan = try_fast_path(clean_fallback, language, pending, known_names) or VoiceTurnPlan(
+            plan = fp_fallback_plan or VoiceTurnPlan(
                 transcript=clean_fallback,
                 intent="unknown",
                 confidence=0.3,
@@ -257,11 +298,11 @@ async def process_audio_turn(
 
         if plan is None:
             plan = VoiceTurnPlan(
-                transcript=fallback_transcript.strip() or "[Audio capture]",
+                transcript=clean_fallback or "[Audio capture]",
                 intent="unknown",
                 confidence=0.25,
                 detected_language=language,
-                clarification_question="Switch AI Mode from Offline or enable Live Voice Mode to transcribe raw audio.",
+                clarification_question="Switch AI Mode from Offline or enable Browser Speech to process audio.",
             )
             model_used = model_used or "offline-fallback"
 
@@ -275,6 +316,8 @@ async def process_audio_turn(
         ephemeral_transcripts=ephemeral,
         channel="voice_audio",
         interactive_confirm=interactive_confirm,
+        fallback_pending_action=fallback_pending,
+        fallback_last_tx_ids=fallback_tx_ids,
     )
     ledger_ms = int((time.perf_counter() - t_led0) * 1000)
 

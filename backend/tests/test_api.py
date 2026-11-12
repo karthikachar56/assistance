@@ -82,3 +82,54 @@ def test_vercel_serverless_entrypoint_and_readonly_safety(monkeypatch, tmp_path,
         assert status_body["live_ws_supported"] is False
 
 
+def test_stateless_pending_action_and_cancel_route_without_pending(api_client):
+    # Turn 1 creates a pending confirmation in session A
+    r1 = api_client.post(
+        "/api/voice/turn",
+        json={
+            "session_id": "vercel-session-a",
+            "transcript": "Suresh Patel 320 udhaar",
+            "language": "hi-IN",
+            "interactive_confirm": True,
+            "include_tts": False,
+        },
+    )
+    assert r1.status_code == 200
+    b1 = r1.json()
+    assert b1["status"] == "needs_confirmation"
+    assert b1["pending_action"]["kind"] == "confirmation"
+
+    # Turn 2 simulates routing to a different cold serverless container (session B has no DB pending state)
+    r2 = api_client.post(
+        "/api/voice/turn",
+        json={
+            "session_id": "vercel-session-b",
+            "transcript": "No, cancel",
+            "language": "hi-IN",
+            "interactive_confirm": True,
+            "include_tts": False,
+            "pending_action": b1["pending_action"],
+        },
+    )
+    assert r2.status_code == 200
+    b2 = r2.json()
+    assert b2["status"] == "cancelled"
+    assert b2["pending_action"] is None
+
+    # Turn 3 simulates clicking Cancel when there is no pending action anywhere
+    r3 = api_client.post(
+        "/api/voice/turn",
+        json={
+            "session_id": "vercel-session-b",
+            "transcript": "No, cancel",
+            "language": "hi-IN",
+            "interactive_confirm": True,
+            "include_tts": False,
+        },
+    )
+    assert r3.status_code == 200
+    b3 = r3.json()
+    assert b3["status"] == "cancelled"
+    assert "samajh nahi aaya" not in b3["spoken_reply"].lower()
+
+

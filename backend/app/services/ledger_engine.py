@@ -509,14 +509,20 @@ class LedgerEngine:
         ephemeral_transcripts: bool = False,
         channel: str = "voice",
         interactive_confirm: bool = False,
+        fallback_pending_action: dict | None = None,
+        fallback_last_tx_ids: list[int] | None = None,
     ) -> VoiceTurnResponse:
         """Apply VoiceTurnPlan deterministically and log telemetry + audit events."""
         with self.db.unit_of_work():
             session = self.db.get_or_create_session(session_id, language)
             pending = json.loads(session["pending_action_json"]) if session["pending_action_json"] else None
+            if pending is None and fallback_pending_action:
+                pending = fallback_pending_action
             last_tx_ids: list[int] = (
                 json.loads(session["last_committed_tx_ids_json"]) if session["last_committed_tx_ids_json"] else []
             )
+            if not last_tx_ids and fallback_last_tx_ids:
+                last_tx_ids = list(fallback_last_tx_ids)
             now = datetime.now(timezone.utc).isoformat()
 
             status = "answered"
@@ -631,7 +637,7 @@ class LedgerEngine:
                         kn="ಯಾವ ಗ್ರಾಹಕರ ವಿವರಗಳನ್ನು ಬದಲಾಯಿಸಬೇಕು, ಸರ್?",
                         hi="Kis customer ki details update karni hai, sir?",
                     )
-                    status = "needs_confirmation"
+                    status = "answered"
                     navigate_tab = "customers"
                 else:
                     match = resolve_customer(self.db, target)
@@ -785,9 +791,24 @@ class LedgerEngine:
                     )
                     status = "needs_disambiguation"
 
-            # Case C: Confirmation reply ("haan" / "nahi")
-            elif plan.intent == "confirmation_reply" and pending:
-                if pending.get("kind") == "confirmation":
+            # Case B2: Friendly Greeting
+            elif plan.intent == "greeting":
+                spoken_reply = _pick_lang(
+                    language,
+                    en="Namaste, sir! Tell me a credit or payment entry, or ask about today's khata.",
+                    kn="ನಮಸ್ಕಾರ ಸರ್! ಉದಾರ್ ಅಥವಾ ಪೇಮೆಂಟ್ ಎಂಟ್ರಿ ಹೇಳಿ, ಅಥವಾ ಇಂದಿನ ಖಾತೆ ವಿವರ ಕೇಳಿ.",
+                    hi="Namaste, sir! Boliye, kya udhaar ya payment likhna hai, ya aaj ka hisaab dekhna hai?",
+                )
+                pending_kind = new_pending.get("kind") if isinstance(new_pending, dict) else None
+                status = (
+                    "needs_confirmation"
+                    if pending_kind in ("confirmation", "create_customer", "update_customer")
+                    else "answered"
+                )
+
+            # Case C: Confirmation reply ("haan" / "nahi" / "No, cancel" — works even if session state reset)
+            elif plan.intent == "confirmation_reply":
+                if pending and pending.get("kind") == "confirmation":
                     if plan.confirmed:
                         txs_out, created = self._commit_operations(
                             pending["operations"], session_id, plan.transcript, language, plan.confidence
@@ -805,7 +826,7 @@ class LedgerEngine:
                         )
                         status = "cancelled"
                         new_pending = None
-                elif pending.get("kind") in ("create_customer", "update_customer", "disambiguation_edit_customer"):
+                elif pending and pending.get("kind") in ("create_customer", "update_customer", "disambiguation_edit_customer"):
                     spoken_reply = _pick_lang(
                         language,
                         en="Cancelled customer update, sir.",
@@ -814,6 +835,24 @@ class LedgerEngine:
                     )
                     status = "cancelled"
                     new_pending = None
+                else:
+                    new_pending = None
+                    if plan.confirmed is False:
+                        spoken_reply = _pick_lang(
+                            language,
+                            en="Okay, cancelled, sir.",
+                            kn="ಸರಿ, ರದ್ದುಗೊಳಿಸಲಾಗಿದೆ, ಸರ್.",
+                            hi="Theek hai, cancel kar diya, sir.",
+                        )
+                        status = "cancelled"
+                    else:
+                        spoken_reply = _pick_lang(
+                            language,
+                            en="There is no pending transaction to confirm right now, sir. Please say the customer and amount.",
+                            kn="ಸದ್ಯಕ್ಕೆ ದೃಢೀಕರಿಸಲು ಯಾವುದೇ ಬಾಕಿ ಎಂಟ್ರಿ ಇಲ್ಲ, ಸರ್. ದಯವಿಟ್ಟು ಗ್ರಾಹಕರ ಹೆಸರು ಮತ್ತು ಮೊತ್ತವನ್ನು ಹೇಳಿ.",
+                            hi="Abhi confirm karne ke liye koi pending entry nahi hai, sir. Kripya customer aur amount dobara boliye.",
+                        )
+                        status = "answered"
 
             # Case D: Spoken correction ("nahi, 430")
             elif plan.intent == "correction":
@@ -1000,7 +1039,13 @@ class LedgerEngine:
                     kn="ಕ್ಷಮಿಸಿ, ಸ್ಪಷ್ಟವಾಗಲಿಲ್ಲ. ಹೀಗೆ ಹೇಳಿ: 'ರಮೇಶ್ ಅವರಿಗೆ 340 ಉದಾರ್' ಅಥವಾ 'ಇವತ್ತು ಎಷ್ಟು ಉದಾರ್ ಆಗಿದೆ?'",
                     hi="Samajh nahi aaya. Jaise boliye: 'Ramesh ka 340 udhaar' ya 'Aaj kitna udhaar gaya?'",
                 )
-                status = "needs_confirmation"
+                pending_kind = new_pending.get("kind") if isinstance(new_pending, dict) else None
+                if pending_kind in ("confirmation", "create_customer", "update_customer"):
+                    status = "needs_confirmation"
+                elif pending_kind in ("disambiguation", "disambiguation_edit_customer"):
+                    status = "needs_disambiguation"
+                else:
+                    status = "answered"
 
             # Enforce Responsible AI first-turn disclosure
             disclosed_now = False

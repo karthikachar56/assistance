@@ -808,6 +808,24 @@ def _resolve_mongo_db_name(mongo_url: str, configured_db_name: str) -> str:
     return configured_db_name or "voice_khata"
 
 
+def _build_mongo_client_kwargs(mongo_url: str) -> dict[str, Any]:
+    """Configure serverless-friendly timeouts and CA roots for MongoDB Atlas TLS connections."""
+    kwargs: dict[str, Any] = {
+        "serverSelectionTimeoutMS": 3500,
+        "connectTimeoutMS": 3500,
+        "socketTimeoutMS": 8000,
+    }
+    low_url = (mongo_url or "").strip().lower()
+    if low_url.startswith("mongodb+srv://") or "tls=true" in low_url or "ssl=true" in low_url:
+        try:
+            import certifi
+
+            kwargs["tlsCAFile"] = certifi.where()
+        except ImportError:
+            pass
+    return kwargs
+
+
 class MongoKhataStore:
     """MongoDB-backed store using atomic integer sequences to keep API schemas unchanged."""
 
@@ -821,11 +839,15 @@ class MongoKhataStore:
         client: Any = None,
     ) -> None:
         self._owns_client = client is None
-        self.client = client or MongoClient(mongo_url, serverSelectionTimeoutMS=5000)
+        self.client = client or MongoClient(mongo_url, **_build_mongo_client_kwargs(mongo_url))
         resolved_name = _resolve_mongo_db_name(mongo_url, db_name)
         self.database_label = resolved_name
         self.mongo_db = self.client[resolved_name]
-        self._ping_and_init_indexes()
+        try:
+            self._ping_and_init_indexes()
+        except Exception:
+            self.close()
+            raise
 
     def _ping_and_init_indexes(self) -> None:
         self.client.admin.command("ping")

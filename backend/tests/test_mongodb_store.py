@@ -398,3 +398,29 @@ def test_mongo_ledger_query_answers():
     assert store.get_customer_by_id(target_id) is None
     assert store.list_customer_transactions(target_id) == []
     assert store.delete_customer(999999) is False
+
+
+def test_build_container_falls_back_to_sqlite_when_mongo_fails(tmp_path, monkeypatch):
+    def _boom_mongo(url, **kwargs):
+        raise RuntimeError(f"SSL handshake failed: [SSL: TLSV1_ALERT_INTERNAL_ERROR] connecting {url}")
+
+    monkeypatch.setattr("app.db.store.MongoClient", _boom_mongo)
+
+    settings = Settings(
+        gemini_api_key="",
+        gnani_api_key="",
+        ledger_encryption_key="fallback-secret",
+        database_path=str(tmp_path / "fallback.db"),
+        mongodb_url="mongodb+srv://dbuser:supersecretpass@cluster0.mongodb.net/kirana_prod",
+        mongodb_db_name="voice_khata",
+    )
+    container = build_container(settings=settings)
+    try:
+        assert container.db.backend_name == "sqlite"
+        assert container.storage_fallback_reason is not None
+        assert "0.0.0.0/0" in container.storage_fallback_reason
+        assert "supersecretpass" not in container.storage_fallback_reason
+        assert container.db.count_customers() == 6
+    finally:
+        if hasattr(container.db, "close"):
+            container.db.close()

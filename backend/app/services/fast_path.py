@@ -66,6 +66,20 @@ _CONFIRM_NO = {
     "mat karo", "rehne do", "chhodo", "dont", "don't", "beda", "vendam", "vaddu",
     "नहीं", "मत करो", "ಬೇಡ", "ಇಲ್ಲ",
 }
+_PURE_CONFIRM_WORDS = {
+    "haan", "han", "ha", "yes", "yeah", "yep", "yup", "ok", "okay", "sure",
+    "confirm", "confirmed", "correct", "proceed", "save", "theek", "thik", "hai",
+    "sahi", "go", "ahead", "kar", "do", "kardo", "likh", "likhdo", "it",
+    "houdu", "haudu", "seri", "avunu", "no", "nope", "nahi", "nahin", "cancel",
+    "abort", "stop", "mat", "karo", "rehne", "chhodo", "dont", "don't", "beda",
+    "vendam", "vaddu", "sir", "madam", "ji", "please", "pls", "jarvis", "assistant",
+    "brother", "bhai", "हाँ", "हां", "ठीक", "ಹೌದು", "ಸರಿ", "नहीं", "ಬೇಡ", "ಇಲ್ಲ",
+}
+_GREETING_RE = re.compile(
+    r"^(?:hi|hello|hey|namaste|namaskar|namaskara|vanakkam|good\s+(?:morning|afternoon|evening)|kaise\s+ho)"
+    r"(?:\s+(?:sir|madam|ji|jarvis|assistant))?$",
+    re.IGNORECASE,
+)
 
 _STOPWORDS_FOR_NAME = {
     "ka", "ki", "ke", "ko", "ne", "se", "ge", "ku", "la", "cha", "chi", "che",
@@ -448,6 +462,14 @@ def try_fast_path(
         return None
     low = text.lower().strip(" ?!.")
 
+    if not pending_action and _GREETING_RE.match(low):
+        return VoiceTurnPlan(
+            transcript=text,
+            intent="greeting",
+            confidence=0.95,
+            detected_language=language,
+        )
+
     # 1. Reply to pending disambiguation ("Kaunse Ramesh? Ramesh Kumar ya Ramesh Gowda?")
     if pending_action and pending_action.get("kind") in ("disambiguation", "disambiguation_edit_customer"):
         is_edit_disambig = pending_action.get("kind") == "disambiguation_edit_customer"
@@ -612,11 +634,13 @@ def try_fast_path(
         return update_plan
 
     # 4. Fast-path deterministic queries (<15ms!)
-    if _match_confirm_yes_no(low) is False and not nums:
+    clean_words = re.sub(r"[,!?.]+", " ", low).split()
+    yn = _match_confirm_yes_no(low) if (not nums and clean_words and all(w in _PURE_CONFIRM_WORDS for w in clean_words)) else None
+    if yn is not None:
         return VoiceTurnPlan(
             transcript=text,
             intent="confirmation_reply",
-            confirmed=False,
+            confirmed=yn,
             confidence=0.92,
             detected_language=language,
         )

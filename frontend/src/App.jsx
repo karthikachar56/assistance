@@ -58,6 +58,7 @@ export default function App() {
 
   const recorderRef = useRef(null);
   const liveClientRef = useRef(null);
+  const lastTurnRef = useRef(null);
   const liveAiAccumRef = useRef("");
   const liveUserAccumRef = useRef("");
   const initializedAudioPrefRef = useRef(false);
@@ -66,6 +67,15 @@ export default function App() {
   const tabRef = useRef("home");
   const turnNavigatedRef = useRef(false);
   const highlightTimerRef = useRef(null);
+
+  const isVercelHost =
+    typeof window !== "undefined" && /(?:^|\.)vercel\.app$/i.test(window.location.hostname);
+  const liveWsSupported = Boolean(!isVercelHost && statusInfo?.live_ws_supported === true);
+
+  function updateLastTurn(turn) {
+    lastTurnRef.current = turn;
+    setLastTurn(turn);
+  }
 
   useEffect(() => {
     tabRef.current = tab;
@@ -120,9 +130,14 @@ export default function App() {
         if (st.gemini_configured || st.gnani_configured) {
           setUseDirectAudio(true);
         }
-        if (st.gemini_configured && st.live_ws_supported !== false) {
+        if (!isVercelHost && st.gemini_configured && st.live_ws_supported !== false) {
           setUseLiveStream(true);
+        } else {
+          setUseLiveStream(false);
         }
+      } else if (isVercelHost || st.live_ws_supported === false) {
+        stopLiveSession();
+        setUseLiveStream(false);
       }
       setErrorMsg("");
       return { custs };
@@ -229,13 +244,15 @@ export default function App() {
     const clean = phrase.trim();
     if (!clean) return;
     setLiveUserText(clean);
-    if (useLiveStream && liveConnected && liveClientRef.current?.sendText(clean)) {
+    if (useLiveStream && liveWsSupported && liveConnected && liveClientRef.current?.sendText(clean)) {
       appendConversation("user", clean);
       setTextDraft("");
       return;
     }
     setIsProcessing(true);
     setErrorMsg("");
+    const activePending = lastTurnRef.current?.pending_action || null;
+    const activeTxIds = (lastTurnRef.current?.transactions || []).map((t) => t.id);
     const payload = {
       session_id: sessionId,
       transcript: clean,
@@ -243,10 +260,12 @@ export default function App() {
       ai_mode: aiMode,
       include_tts: Boolean(statusInfo?.gemini_configured || statusInfo?.gnani_configured),
       interactive_confirm: interactiveConfirm,
+      pending_action: activePending,
+      last_committed_tx_ids: activeTxIds.length > 0 ? activeTxIds : null,
     };
     try {
       const res = await api.voiceTurnText(payload);
-      setLastTurn(res);
+      updateLastTurn(res);
       setLiveTranscriptNote(res.spoken_reply);
       appendConversation("user", res.transcript);
       appendConversation("ai", res.spoken_reply);
@@ -272,7 +291,11 @@ export default function App() {
   }
 
   async function toggleMic() {
-    if (useLiveStream) {
+    if (useLiveStream && !liveWsSupported) {
+      stopLiveSession();
+      setUseLiveStream(false);
+    }
+    if (useLiveStream && liveWsSupported) {
       if (liveConnected || liveConnecting) {
         stopLiveSession();
         setLiveTranscriptNote("");
@@ -315,7 +338,7 @@ export default function App() {
           onMicInfo: (info) => setMicInfo(info),
           onSpeakingChange: (speaking) => setAiSpeaking(speaking),
           onLedgerEvent: (payload) => {
-            setLastTurn(payload);
+            updateLastTurn(payload);
             if (payload.transcript) {
               setLiveUserText(payload.transcript);
             }
@@ -411,8 +434,10 @@ export default function App() {
             includeTts: true,
             fallbackTranscript: result.browserTranscript,
             interactiveConfirm,
+            pendingAction: lastTurnRef.current?.pending_action || null,
+            lastCommittedTxIds: (lastTurnRef.current?.transactions || []).map((t) => t.id),
           });
-          setLastTurn(res);
+          updateLastTurn(res);
           setLiveUserText(res.transcript);
           setLiveTranscriptNote(res.spoken_reply);
           appendConversation("user", res.transcript);
@@ -438,7 +463,9 @@ export default function App() {
         await runTextTurn(result.browserTranscript);
       } else {
         setErrorMsg(
-          "No speech transcript detected. Check mic permission, type below, or enable Live Voice Mode."
+          liveWsSupported
+            ? "No speech transcript detected. Check mic permission, type below, or enable Live Voice Mode."
+            : "No speech transcript detected. Check mic permission or type your command below."
         );
       }
     }
@@ -496,10 +523,10 @@ export default function App() {
           aiSpeaking={aiSpeaking}
           isRecording={isRecording}
           isProcessing={isProcessing}
-          useLiveStream={useLiveStream}
+          useLiveStream={useLiveStream && liveWsSupported}
           interactiveConfirm={interactiveConfirm}
           geminiConfigured={Boolean(statusInfo?.gemini_configured)}
-          liveWsSupported={statusInfo?.live_ws_supported !== false}
+          liveWsSupported={liveWsSupported}
           micLevel={micLevel}
           micInfo={micInfo}
           liveUserText={liveUserText}
@@ -510,10 +537,12 @@ export default function App() {
           language={language}
           onToggleMic={toggleMic}
           onToggleLiveStream={(enabled) => {
-            if (!enabled) {
+            if (!enabled || !liveWsSupported) {
               stopLiveSession();
+              setUseLiveStream(false);
+              return;
             }
-            setUseLiveStream(enabled);
+            setUseLiveStream(true);
           }}
           onToggleInteractiveConfirm={(val) => {
             setInteractiveConfirm(val);
@@ -530,9 +559,19 @@ export default function App() {
               className={`mic-btn ${isRecording || liveConnected ? "recording" : ""}`}
               onClick={toggleMic}
               disabled={isProcessing}
-              title={useLiveStream ? "Toggle Gemini 3.8 Live Stream" : "Tap to speak / tap again to stop"}
+              title={
+                useLiveStream && liveWsSupported
+                  ? "Toggle Gemini 3.8 Live Stream"
+                  : "Tap to speak / tap again to stop"
+              }
             >
-              {useLiveStream ? <Radio size={22} /> : isRecording ? <MicOff size={22} /> : <Mic size={22} />}
+              {useLiveStream && liveWsSupported ? (
+                <Radio size={22} />
+              ) : isRecording ? (
+                <MicOff size={22} />
+              ) : (
+                <Mic size={22} />
+              )}
             </button>
 
             <form
@@ -674,15 +713,18 @@ export default function App() {
             speechProvider={speechProvider}
             ephemeral={ephemeral}
             useDirectAudio={useDirectAudio}
-            useLiveStream={useLiveStream}
+            useLiveStream={useLiveStream && liveWsSupported}
+            liveWsSupported={liveWsSupported}
             interactiveConfirm={interactiveConfirm}
             onUpdateSetting={handleUpdateSettings}
             onToggleDirectAudio={setUseDirectAudio}
             onToggleLiveStream={(enabled) => {
-              if (!enabled) {
+              if (!enabled || !liveWsSupported) {
                 stopLiveSession();
+                setUseLiveStream(false);
+                return;
               }
-              setUseLiveStream(enabled);
+              setUseLiveStream(true);
             }}
             onToggleInteractiveConfirm={(val) => {
               setInteractiveConfirm(val);

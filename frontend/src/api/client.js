@@ -62,6 +62,8 @@ export const api = {
     includeTts,
     fallbackTranscript = "",
     interactiveConfirm = false,
+    pendingAction = null,
+    lastCommittedTxIds = null,
   }) => {
     const fd = new FormData();
     fd.append("file", blob, filename);
@@ -71,6 +73,12 @@ export const api = {
     fd.append("include_tts", String(Boolean(includeTts)));
     fd.append("fallback_transcript", fallbackTranscript || "");
     fd.append("interactive_confirm", String(Boolean(interactiveConfirm)));
+    if (pendingAction) {
+      fd.append("pending_action_json", JSON.stringify(pendingAction));
+    }
+    if (Array.isArray(lastCommittedTxIds) && lastCommittedTxIds.length > 0) {
+      fd.append("last_committed_tx_ids_json", JSON.stringify(lastCommittedTxIds));
+    }
     return request("/api/voice/audio", { method: "POST", body: fd });
   },
   voiceHistory: () => request("/api/voice/history"),

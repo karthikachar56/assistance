@@ -116,3 +116,67 @@ def test_ledger_queries_fast_path(isolated_container):
     q2 = _run_text(isolated_container, "s6", "Suresh ka total batao")
     assert q2.status == "answered"
     assert "650" in q2.spoken_reply
+
+
+def test_unknown_greeting_and_cancel_without_pending_never_loop(isolated_container):
+    from app.schemas.models import VoiceTurnPlan
+
+    # 1. Unknown utterance with no pending action must NOT show needs_confirmation
+    unknown_plan = VoiceTurnPlan(
+        transcript="random mumble",
+        intent="unknown",
+        confidence=0.2,
+        detected_language="hi-IN",
+    )
+    res_unknown = isolated_container.ledger.process_turn(
+        session_id="no-loop-1",
+        plan=unknown_plan,
+        language="hi-IN",
+        model_used="test",
+        latency=LatencyBreakdown(),
+    )
+    assert res_unknown.status == "answered"
+    assert res_unknown.pending_action is None
+
+    # 2. Clicking Cancel ("No, cancel") even with no pending returns cancelled cleanly
+    res_cancel = _run_text(isolated_container, "no-loop-1", "No, cancel")
+    assert res_cancel.status == "cancelled"
+    assert "samajh nahi aaya" not in res_cancel.spoken_reply.lower()
+
+    # 3. Clicking Yes confirm ("Yes, confirm") with no pending returns answered cleanly
+    res_yes = _run_text(isolated_container, "no-loop-1", "Yes, confirm")
+    assert res_yes.status == "answered"
+    assert "samajh nahi aaya" not in res_yes.spoken_reply.lower()
+
+    # 4. Greeting does not loop into confirmation
+    res_greet = _run_text(isolated_container, "no-loop-1", "Namaste")
+    assert res_greet.status == "answered"
+    assert res_greet.intent == "greeting"
+
+    # 5. Stateless fallback_pending_action confirms transaction on a brand new cold session
+    pending_from_turn1 = {
+        "kind": "confirmation",
+        "operations": [
+            {
+                "customer_name": "Suresh Patel",
+                "amount": 250.0,
+                "tx_type": "credit",
+                "resolved_date": date.today().isoformat(),
+                "note": None,
+                "needs_disambiguation": False,
+                "resolved_customer_id": None,
+            }
+        ],
+    }
+    plan_yes = try_fast_path("Yes, confirm", "en-IN", pending_from_turn1, ["Suresh Patel"])
+    assert plan_yes is not None
+    res_stateless = isolated_container.ledger.process_turn(
+        session_id="cold-instance-session",
+        plan=plan_yes,
+        language="en-IN",
+        model_used="fast-path-test",
+        latency=LatencyBreakdown(),
+        fallback_pending_action=pending_from_turn1,
+    )
+    assert res_stateless.status == "recorded"
+    assert res_stateless.transactions[0].amount == 250.0

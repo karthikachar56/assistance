@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import time
 from typing import Any
 
 from app.config import Settings, get_settings
@@ -33,7 +34,7 @@ class GeminiKhataEngine:
                 api_key=self.settings.gemini_api_key,
                 http_options=types.HttpOptions(
                     api_version=self.settings.gemini_api_version,
-                    timeout=6500,
+                    timeout=4500,
                     retry_options=types.HttpRetryOptions(attempts=1),
                 ),
             )
@@ -93,13 +94,18 @@ class GeminiKhataEngine:
         candidates: list[tuple[str, str | None]],
         system_instruction: str,
         input_payload: Any,
+        *,
+        deadline_sec: float = 7.2,
     ) -> tuple[VoiceTurnPlan, str]:
-        """Try prioritized Gemini models in order so a transient 503/429 never stalls a counter sale."""
+        """Try prioritized Gemini models in order within a serverless-safe time budget."""
         last_exc: Exception | None = None
         seen: set[tuple[str, str | None]] = set()
-        for model_id, thinking_level in candidates:
+        t_start = time.monotonic()
+        for idx, (model_id, thinking_level) in enumerate(candidates):
             if (model_id, thinking_level) in seen:
                 continue
+            if idx > 0 and (time.monotonic() - t_start) > deadline_sec:
+                break
             seen.add((model_id, thinking_level))
             try:
                 return self._call_model(model_id, thinking_level, system_instruction, input_payload), model_id
@@ -121,6 +127,7 @@ class GeminiKhataEngine:
         audio_mime_type: str = "audio/wav",
     ) -> tuple[VoiceTurnPlan, str]:
         """Parse text or raw audio using resilient Interactions API cascade."""
+        t_total = time.monotonic()
         system_prompt = build_kirana_system_prompt(
             language=language,
             known_customers=known_customers,
@@ -173,7 +180,7 @@ class GeminiKhataEngine:
             or plan.intent == "unknown"
             or any(op.direction_ambiguous or bool(op.ambiguous_amounts) for op in plan.operations)
         )
-        if should_escalate:
+        if should_escalate and (time.monotonic() - t_total) < 4.5:
             try:
                 pro_plan = self._call_model(self.settings.gemini_pro_model, "medium", system_prompt, input_payload)
                 if pro_plan.confidence >= plan.confidence:

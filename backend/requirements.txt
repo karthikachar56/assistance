@@ -10,6 +10,7 @@ httpx>=0.28.0
 pytest>=8.3.0
 pymongo>=4.10.0
 dnspython>=2.7.0
+certifi>=2024.8.30
 # Optional Gnani official SDK for Prisma STT & Timbre TTS:
 # gnani-vachana>=0.1.0
 
