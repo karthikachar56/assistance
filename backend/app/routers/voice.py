@@ -13,6 +13,8 @@ from app.deps import AppContainer, get_container
 from app.schemas.models import (
     LanguageCode,
     LatencyBreakdown,
+    LiveTokenRequest,
+    LiveToolExecuteRequest,
     TTSRequest,
     VoiceTurnPlan,
     VoiceTurnResponse,
@@ -20,6 +22,7 @@ from app.schemas.models import (
 )
 from app.services.fast_path import try_fast_path, verify_and_guard_plan
 from app.services.gemini_live import run_gemini_live_bridge
+from app.services.live_token_service import execute_browser_live_tool, mint_live_ephemeral_token
 
 
 router = APIRouter(prefix="/api/voice", tags=["voice"])
@@ -39,9 +42,8 @@ def _maybe_synthesize_tts(
         if provider in ("gnani", "auto") and container.gnani.is_available:
             b64, mime = container.gnani.synthesize_speech(text, language)
             return b64, mime, int((time.perf_counter() - t0) * 1000)
-        # In "auto" mode, prefer sub-50ms browser speechSynthesis for REST turns to guarantee <2s SLA;
-        # use Gemini 3.8 cloud TTS when provider == "gemini" (or via explicit /api/voice/tts).
-        if provider == "gemini" and container.settings.has_gemini:
+        # Synthesize Gemini 3.8 Cloud WAV audio for both "gemini" and "auto" (only "browser" skips Cloud TTS)
+        if provider in ("gemini", "auto") and container.settings.has_gemini:
             res = container.gemini.synthesize_tts(text, language)
             if res:
                 return res[0], res[1], int((time.perf_counter() - t0) * 1000)
@@ -347,6 +349,53 @@ def synthesize_tts_endpoint(
 ) -> dict:
     b64, mime, tts_ms = _maybe_synthesize_tts(container, req.text, req.language)
     return {"audio_base64": b64, "audio_mime_type": mime, "tts_ms": tts_ms}
+
+
+@router.post("/live-token")
+def create_live_ephemeral_token(
+    req: LiveTokenRequest,
+    container: AppContainer = Depends(get_container),
+) -> dict:
+    """Provision a short-lived ephemeral token for direct browser -> Gemini 3.8 Live WebSocket."""
+    if not container.settings.has_gemini:
+        raise HTTPException(status_code=503, detail="GEMINI_API_KEY is required for Live Voice Mode.")
+    try:
+        return mint_live_ephemeral_token(
+            ledger=container.ledger,
+            settings=container.settings,
+            session_id=req.session_id,
+            language=req.language,
+            extended_thinking=req.extended,
+            interactive_confirm=req.interactive_confirm,
+            voice_name=req.voice,
+            resume_handle=req.resume_handle,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to start Gemini Live token ({type(exc).__name__}): {exc}",
+        ) from exc
+
+
+@router.post("/live-tool", response_model=VoiceTurnResponse)
+def execute_live_tool_endpoint(
+    req: LiveToolExecuteRequest,
+    container: AppContainer = Depends(get_container),
+) -> VoiceTurnResponse:
+    """Execute a Gemini Live tool call against ACID SQLite/MongoDB storage over REST."""
+    ephemeral = _read_setting(container, "ephemeral_transcripts", "false") == "true"
+    return execute_browser_live_tool(
+        ledger=container.ledger,
+        session_id=req.session_id,
+        language=req.language,
+        model_used=req.model,
+        tool_name=req.tool_name,
+        args=req.args,
+        ephemeral_transcripts=ephemeral,
+        interactive_confirm=req.interactive_confirm,
+        fallback_pending_action=req.pending_action,
+        fallback_last_tx_ids=req.last_committed_tx_ids,
+    )
 
 
 @router.get("/history")

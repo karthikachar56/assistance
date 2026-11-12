@@ -14,7 +14,9 @@ describe("previewSpokenAmount", () => {
     expect(previewSpokenAmount("Suresh dedh sau payment")).toBe(150);
     expect(previewSpokenAmount("Ramesh ka ३४० udhaar")).toBe(340);
     expect(previewSpokenAmount("Suresh 2.5k jama")).toBe(2500);
+    expect(previewSpokenAmount("do sau pachaas")).toBe(250);
     expect(previewSpokenAmount("so good customer")).toBeNull();
+    expect(previewSpokenAmount("Hello, explain briefly what you can do")).toBeNull();
   });
 
   it("formats INR values cleanly", () => {

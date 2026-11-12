@@ -811,9 +811,12 @@ def _resolve_mongo_db_name(mongo_url: str, configured_db_name: str) -> str:
 def _build_mongo_client_kwargs(mongo_url: str) -> dict[str, Any]:
     """Configure serverless-friendly timeouts and CA roots for MongoDB Atlas TLS connections."""
     kwargs: dict[str, Any] = {
-        "serverSelectionTimeoutMS": 3500,
-        "connectTimeoutMS": 3500,
-        "socketTimeoutMS": 8000,
+        "serverSelectionTimeoutMS": 5500,
+        "connectTimeoutMS": 5000,
+        "socketTimeoutMS": 10000,
+        "maxPoolSize": 5,
+        "retryReads": True,
+        "retryWrites": True,
     }
     low_url = (mongo_url or "").strip().lower()
     if low_url.startswith("mongodb+srv://") or "tls=true" in low_url or "ssl=true" in low_url:
@@ -851,8 +854,16 @@ class MongoKhataStore:
 
     def _ping_and_init_indexes(self) -> None:
         self.client.admin.command("ping")
-        self.mongo_db["customers"].create_index([("id", ASCENDING)], unique=True)
-        self.mongo_db["customers"].create_index([("normalized_name", ASCENDING)])
+        cust_col = self.mongo_db["customers"]
+        settings_col = self.mongo_db["app_settings"]
+        if hasattr(cust_col, "index_information") and hasattr(settings_col, "index_information"):
+            try:
+                if "id_1" in cust_col.index_information() and "key_1" in settings_col.index_information():
+                    return
+            except Exception:
+                pass
+        cust_col.create_index([("id", ASCENDING)], unique=True)
+        cust_col.create_index([("normalized_name", ASCENDING)])
         self.mongo_db["transactions"].create_index([("id", ASCENDING)], unique=True)
         self.mongo_db["transactions"].create_index([("customer_id", ASCENDING), ("status", ASCENDING)])
         self.mongo_db["transactions"].create_index([("transaction_date", ASCENDING), ("tx_type", ASCENDING), ("status", ASCENDING)])
@@ -861,7 +872,7 @@ class MongoKhataStore:
         self.mongo_db["voice_logs"].create_index([("created_at", DESCENDING)])
         self.mongo_db["audit_logs"].create_index([("id", ASCENDING)], unique=True)
         self.mongo_db["audit_logs"].create_index([("transaction_id", ASCENDING), ("created_at", DESCENDING)])
-        self.mongo_db["app_settings"].create_index([("key", ASCENDING)], unique=True)
+        settings_col.create_index([("key", ASCENDING)], unique=True)
 
     def close(self) -> None:
         if self._owns_client and hasattr(self.client, "close"):

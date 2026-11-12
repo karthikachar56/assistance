@@ -133,3 +133,196 @@ def test_stateless_pending_action_and_cancel_route_without_pending(api_client):
     assert "samajh nahi aaya" not in b3["spoken_reply"].lower()
 
 
+def test_conversational_checks_and_multi_customer_query(api_client):
+    r_hear = api_client.post(
+        "/api/voice/turn",
+        json={
+            "session_id": "conv-1",
+            "transcript": "hello, main jo bol raha hoon, kya tumhe sunai de raha hai?",
+            "language": "hi-IN",
+            "include_tts": False,
+        },
+    )
+    assert r_hear.status_code == 200
+    body_hear = r_hear.json()
+    assert body_hear["intent"] == "greeting"
+    assert "awaaz" in body_hear["spoken_reply"].lower()
+
+    r_cap = api_client.post(
+        "/api/voice/turn",
+        json={
+            "session_id": "conv-1",
+            "transcript": "Hello, explain briefly what you can do",
+            "language": "en-IN",
+            "include_tts": False,
+        },
+    )
+    assert r_cap.status_code == 200
+    assert "credit" in r_cap.json()["spoken_reply"].lower()
+
+    r_multi = api_client.post(
+        "/api/voice/turn",
+        json={
+            "session_id": "conv-1",
+            "transcript": "Mohan Rao aur Suresh Patel ke pichhle transactions batao",
+            "language": "hi-IN",
+            "include_tts": False,
+        },
+    )
+    assert r_multi.status_code == 200
+    multi_body = r_multi.json()
+    assert multi_body["intent"] == "query_ledger"
+    assert "Mohan Rao" in multi_body["spoken_reply"]
+    assert "Suresh Patel" in multi_body["spoken_reply"]
+    assert multi_body["open_customer_details"] is False
+
+
+def test_auto_speech_provider_synthesizes_gemini_tts_and_live_tool_route(isolated_container, api_client, monkeypatch):
+    monkeypatch.setattr(isolated_container.settings, "gemini_api_key", "fake-test-key")
+    monkeypatch.setattr(
+        isolated_container.gemini,
+        "synthesize_tts",
+        lambda text, lang: ("AQIDBA==", "audio/wav"),
+    )
+
+    # speech_provider starts as "auto" -> should now return Gemini WAV audio cleanly
+    res = api_client.post(
+        "/api/voice/turn",
+        json={
+            "session_id": "tts-auto",
+            "transcript": "Aaj kitna udhaar gaya?",
+            "language": "hi-IN",
+            "include_tts": True,
+        },
+    )
+    assert res.status_code == 200
+    assert res.json()["audio_base64"] == "AQIDBA=="
+    assert res.json()["audio_mime_type"] == "audio/wav"
+
+    # Explicit "browser" skips Cloud TTS
+    api_client.patch("/api/settings", json={"speech_provider": "browser"})
+    res_browser = api_client.post(
+        "/api/voice/turn",
+        json={
+            "session_id": "tts-auto",
+            "transcript": "Aaj kitna udhaar gaya?",
+            "language": "hi-IN",
+            "include_tts": True,
+        },
+    )
+    assert res_browser.status_code == 200
+    assert res_browser.json()["audio_base64"] is None
+
+    # /api/status advertises live_ephemeral_supported when Gemini key exists
+    st = api_client.get("/api/status").json()
+    assert st["live_ephemeral_supported"] is True
+
+    # /api/voice/live-tool supports interactive confirm -> stateless cancel round-trip
+    lt1 = api_client.post(
+        "/api/voice/live-tool",
+        json={
+            "session_id": "ephem-s1",
+            "language": "en-IN",
+            "tool_name": "record_khata_operations",
+            "interactive_confirm": True,
+            "args": {
+                "transcript": "Add 200 credit to Suresh Patel",
+                "operations": [{"customer_name": "Suresh Patel", "amount": 200, "tx_type": "credit"}],
+            },
+        },
+    )
+    assert lt1.status_code == 200
+    assert lt1.json()["status"] == "needs_confirmation"
+
+    lt2 = api_client.post(
+        "/api/voice/live-tool",
+        json={
+            "session_id": "ephem-s2",
+            "language": "en-IN",
+            "tool_name": "confirm_pending_action",
+            "interactive_confirm": True,
+            "pending_action": lt1.json()["pending_action"],
+            "args": {"transcript": "No, cancel", "confirmed": False},
+        },
+    )
+    assert lt2.status_code == 200
+    assert lt2.json()["status"] == "cancelled"
+
+
+def test_gemini_engine_cooldown_and_mongo_fallback_healing(isolated_container, monkeypatch, tmp_path):
+    from app.config import Settings
+    from app import deps as deps_mod
+    from app.schemas.models import VoiceTurnPlan
+
+    monkeypatch.setattr(isolated_container.settings, "gemini_api_key", "fake-test-key")
+    calls: list[str] = []
+
+    def _fake_call(model_id, thinking_level, system_instruction, input_payload):
+        calls.append(model_id)
+        if model_id == "gemini-3.8-flash":
+            raise RuntimeError("429 RateLimitError limit: 20 requests per day")
+        return VoiceTurnPlan(
+            transcript="hello",
+            intent="greeting",
+            clarification_question="Yes sir, listening clearly!",
+            confidence=0.95,
+            detected_language="en-IN",
+        )
+
+    monkeypatch.setattr(isolated_container.gemini, "_call_model", _fake_call)
+    p1, u1 = isolated_container.gemini.parse_turn(
+        language="en-IN", known_customers=[], pending_action=None, ai_mode="cascaded", transcript="hello"
+    )
+    assert u1 == isolated_container.settings.gemini_lite_model
+    assert p1.clarification_question == "Yes sir, listening clearly!"
+    assert calls == ["gemini-3.8-flash", isolated_container.settings.gemini_lite_model]
+
+    calls.clear()
+    _, u2 = isolated_container.gemini.parse_turn(
+        language="en-IN", known_customers=[], pending_action=None, ai_mode="cascaded", transcript="hello again"
+    )
+    assert u2 == isolated_container.settings.gemini_lite_model
+    # Cooled down 3.8 Flash was skipped on turn 2!
+    assert calls == [isolated_container.settings.gemini_lite_model]
+
+    # Verify deps.get_container() heals out of SQLite fallback once MongoDB recovers
+    attempts = {"n": 0}
+
+    class _MockMongoStore:
+        backend_name = "mongodb"
+        database_label = "voice_khata"
+
+        def __init__(self, mongo_url="", db_name="voice_khata"):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise RuntimeError("TLSV1_ALERT_INTERNAL_ERROR")
+
+        def unit_of_work(self):
+            from contextlib import nullcontext
+            return nullcontext()
+
+        def count_customers(self):
+            return 1
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(deps_mod, "MongoKhataStore", _MockMongoStore)
+    cfg = Settings(
+        gemini_api_key="",
+        gnani_api_key="",
+        mongodb_url="mongodb+srv://user:pass@cluster.example.net/voice_khata",
+        database_path=str(tmp_path / "heal_fallback.db"),
+        ledger_encryption_key="test-key-heal",
+    )
+    degraded = deps_mod.build_container(settings=cfg)
+    assert degraded.storage_fallback_reason is not None
+    deps_mod.set_container(degraded)
+    deps_mod._mongo_retry_after = 0.0
+    healed = deps_mod.get_container()
+    assert healed.storage_fallback_reason is None
+    assert healed.db.backend_name == "mongodb"
+    deps_mod.set_container(None)
+
+
+

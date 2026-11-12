@@ -86,6 +86,14 @@ KIRANA_FEW_SHOT_EXAMPLES: tuple[dict[str, str], ...] = (
         "input": "Delete customer Ramesh Gowda",
         "output": '{"intent":"delete_customer_blocked","confidence":0.99}',
     },
+    {
+        "input": "Hello, main jo bol raha hoon kya tumhe sunai de raha hai?",
+        "output": '{"intent":"greeting","clarification_question":"Haan bilkul sir, aapki awaaz bilkul saaf aa rahi hai! Boliye kya khata entry likhni hai?","confidence":0.96}',
+    },
+    {
+        "input": "What can you do?",
+        "output": '{"intent":"greeting","clarification_question":"Sir, I record customer udhaar & payments by voice, check daily totals and customer balances, and manage your customer list.","confidence":0.96}',
+    },
 )
 
 
@@ -147,7 +155,8 @@ def build_kirana_system_prompt(
         "5. Corrections: ('nahi 430', 'sorry 250', 'udhaar nahi payment tha') -> intent='correction'.\n"
         "6. Dates: aaj/ivattu/today='today'; kal/ninne/netru='yesterday' (unless explicit future); parso/monne='day_before_yesterday'.\n"
         "7. Customer Roster Alignment: Match customer_name to Known Customers when unambiguous; if only first name 'Ramesh' is spoken and multiple 'Ramesh ...' exist in Known Customers, pass 'Ramesh' so the ledger disambiguates safely.\n"
-        "8. Adding & Editing Customers: You can ADD customers (intent='create_customer', new_customer_name, optional new_customer_phone/new_customer_opt_in) AND EDIT existing customer details (intent='update_customer', edit_target_customer, optional edit_new_name/edit_new_phone/edit_opt_in/edit_preferred_language). NEVER delete a customer — if asked to delete/remove a customer, return intent='delete_customer_blocked' (deletion is manual-only on screen).\n\n"
+        "8. Adding & Editing Customers: You can ADD customers (intent='create_customer', new_customer_name, optional new_customer_phone/new_customer_opt_in) AND EDIT existing customer details (intent='update_customer', edit_target_customer, optional edit_new_name/edit_new_phone/edit_opt_in/edit_preferred_language). NEVER delete a customer — if asked to delete/remove a customer, return intent='delete_customer_blocked' (deletion is manual-only on screen).\n"
+        "9. Conversational Check-ins & General Questions: If the shopkeeper says 'hello, can you hear me?', 'kya sunai de raha hai?', or asks what you can do, set intent='greeting', set needs_clarification=false, and ALWAYS put a direct, friendly 1-sentence answer in the Shopkeeper's language inside 'clarification_question'.\n\n"
         f"Training Examples:\n{examples_block}\n\n"
         f"Shopkeeper language: {language}\n"
         f"Known customers: {customers_hint}\n"

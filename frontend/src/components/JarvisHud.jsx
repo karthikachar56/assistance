@@ -13,6 +13,7 @@ export function JarvisHud({
   interactiveConfirm,
   geminiConfigured,
   liveWsSupported = true,
+  canLiveStream = liveWsSupported,
   micLevel,
   micInfo,
   liveUserText,
@@ -25,6 +26,7 @@ export function JarvisHud({
   onToggleLiveStream,
   onToggleInteractiveConfirm,
   onQuickReply,
+  onReplayAudio,
 }) {
   const isListening = liveConnected || isRecording;
   const awaitingCustName =
@@ -84,11 +86,9 @@ export function JarvisHud({
               )}
             </div>
             <div className="jarvis-subtitle">
-              {useLiveStream && liveWsSupported
+              {useLiveStream && canLiveStream
                 ? "Real-time voice + live transcript"
-                : !liveWsSupported
-                ? "Push-to-Talk Voice · Cloud Audio & Instant Browser STT"
-                : "Instant Browser STT + Resilient Cloud Audio Fallback"}
+                : "Hands-Free Push-to-Talk (auto-sends on pause) · Cloud Audio"}
             </div>
           </div>
         </div>
@@ -98,13 +98,11 @@ export function JarvisHud({
             type="button"
             className={`jarvis-pill-btn ${useLiveStream ? "active" : ""}`}
             onClick={() => onToggleLiveStream(!useLiveStream)}
-            disabled={!geminiConfigured || !liveWsSupported}
+            disabled={!geminiConfigured || !canLiveStream}
             title={
-              !liveWsSupported
-                ? "Real-time /ws/live requires a WebSocket server (Push-to-Talk & Cloud Audio REST are active)"
-                : geminiConfigured
-                ? "Switch between Gemini Live Stream and Push-to-Talk"
-                : "Requires Gemini API Key"
+              !canLiveStream
+                ? "Requires Gemini API Key for Real-Time Live Voice Mode"
+                : "Switch between Gemini 3.8 Live Stream and Hands-Free Push-to-Talk"
             }
           >
             <Radio size={13} /> {useLiveStream ? "Live AI: ON" : "Push-to-Talk"}
@@ -172,12 +170,14 @@ export function JarvisHud({
                 type="button"
                 className="jarvis-replay-btn"
                 onClick={() =>
-                  playReplyAudio({
-                    audioBase64: lastTurn.audio_base64,
-                    audioMimeType: lastTurn.audio_mime_type,
-                    text: lastTurn.spoken_reply,
-                    language,
-                  })
+                  onReplayAudio
+                    ? onReplayAudio(lastTurn)
+                    : playReplyAudio({
+                        audioBase64: lastTurn.audio_base64,
+                        audioMimeType: lastTurn.audio_mime_type,
+                        text: lastTurn.spoken_reply,
+                        language,
+                      })
                 }
                 title="Replay reply"
               >

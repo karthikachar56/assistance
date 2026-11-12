@@ -1,4 +1,4 @@
-import React, { useEffect } from "react";
+import React, { useEffect, useRef } from "react";
 import { BookOpen, Settings, Users, X } from "lucide-react";
 
 export const NAV_SECTIONS = [
@@ -26,8 +26,19 @@ export const NAV_SECTIONS = [
  * Right-side slide-over navigation drawer holding Khata, Customers, and Settings.
  */
 export function RightSlideDashboard({ open, activeTab, onSelectTab, onClose }) {
+  const asideRef = useRef(null);
+
   useEffect(() => {
-    if (!open) return undefined;
+    if (!open) {
+      if (
+        typeof document !== "undefined" &&
+        document.activeElement instanceof HTMLElement &&
+        asideRef.current?.contains(document.activeElement)
+      ) {
+        document.activeElement.blur();
+      }
+      return undefined;
+    }
     const onKeyDown = (e) => {
       if (e.key === "Escape") onClose();
     };
@@ -44,10 +55,12 @@ export function RightSlideDashboard({ open, activeTab, onSelectTab, onClose }) {
       />
 
       <aside
+        ref={asideRef}
         id="right-sliding-dashboard"
         className={`nav-drawer ${open ? "open" : ""}`}
         aria-label="Sliding dashboard menu"
         aria-hidden={!open}
+        inert={!open ? "" : undefined}
       >
         <div className="nav-drawer-header">
           <div>

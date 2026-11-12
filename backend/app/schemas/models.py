@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -271,6 +271,26 @@ class ReminderResponse(BaseModel):
 class TTSRequest(BaseModel):
     text: str = Field(min_length=1, max_length=600)
     language: LanguageCode = "hi-IN"
+
+
+class LiveTokenRequest(BaseModel):
+    session_id: str = Field(min_length=1, max_length=64)
+    language: LanguageCode = "hi-IN"
+    extended: bool = False
+    interactive_confirm: bool = False
+    voice: str | None = None
+    resume_handle: str | None = None
+
+
+class LiveToolExecuteRequest(BaseModel):
+    session_id: str = Field(min_length=1, max_length=64)
+    language: LanguageCode = "hi-IN"
+    model: str = "gemini-3.8-live"
+    tool_name: str = Field(min_length=1, max_length=80)
+    args: dict[str, Any] = Field(default_factory=dict)
+    interactive_confirm: bool = False
+    pending_action: dict | None = None
+    last_committed_tx_ids: list[int] | None = None
 
 
 class SettingsUpdate(BaseModel):

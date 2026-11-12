@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 import re
+import time
 
 from app.config import Settings, get_settings
 from app.db.crypto import FieldCipher
@@ -41,9 +42,11 @@ class AppContainer:
 
 
 _container: AppContainer | None = None
+_mongo_retry_after: float = 0.0
 
 
 def build_container(settings: Settings | None = None, db_path: str | None = None) -> AppContainer:
+    global _mongo_retry_after
     cfg = settings or get_settings()
     cipher = FieldCipher(cfg.ledger_encryption_key or None)
     storage_fallback_reason: str | None = None
@@ -57,6 +60,7 @@ def build_container(settings: Settings | None = None, db_path: str | None = None
             db = MongoKhataStore(mongo_url=mongo_url, db_name=cfg.mongodb_db_name)
             seed_synthetic_data(db, cipher)
         except Exception as exc:
+            _mongo_retry_after = time.monotonic() + 15.0
             storage_fallback_reason = _format_mongo_fallback_reason(exc)
             logger.warning("%s", storage_fallback_reason)
             db = SqliteKhataStore(db_path=cfg.resolved_database_path)
@@ -74,13 +78,36 @@ def build_container(settings: Settings | None = None, db_path: str | None = None
 
 
 def get_container() -> AppContainer:
-    global _container
+    global _container, _mongo_retry_after
     if _container is None:
         _container = build_container()
+    elif (
+        _container.storage_fallback_reason is not None
+        and _container.settings.has_mongo
+        and time.monotonic() >= _mongo_retry_after
+    ):
+        # Heal warm serverless containers that hit a transient cold-boot MongoDB failure
+        try:
+            mongo_url = _container.settings.mongodb_url.strip().strip('"').strip("'")
+            mongo_db = MongoKhataStore(mongo_url=mongo_url, db_name=_container.settings.mongodb_db_name)
+            seed_synthetic_data(mongo_db, _container.cipher)
+            _container = AppContainer(
+                settings=_container.settings,
+                db=mongo_db,
+                cipher=_container.cipher,
+                ledger=LedgerEngine(mongo_db, _container.cipher),
+                gemini=_container.gemini,
+                gnani=_container.gnani,
+                storage_fallback_reason=None,
+            )
+            _mongo_retry_after = 0.0
+        except Exception:
+            _mongo_retry_after = time.monotonic() + 15.0
     return _container
 
 
 def set_container(container: AppContainer | None) -> None:
-    global _container
+    global _container, _mongo_retry_after
     _container = container
+    _mongo_retry_after = 0.0
 

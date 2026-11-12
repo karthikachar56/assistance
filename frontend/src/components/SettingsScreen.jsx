@@ -18,6 +18,8 @@ export function SettingsScreen({
   useDirectAudio,
   useLiveStream,
   liveWsSupported = true,
+  liveEphemeralSupported = false,
+  canLiveStream = liveWsSupported || liveEphemeralSupported,
   interactiveConfirm,
   onUpdateSetting,
   onToggleDirectAudio,
@@ -84,13 +86,16 @@ export function SettingsScreen({
           <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: "0.86rem" }}>
             <input
               type="checkbox"
-              checked={useLiveStream && liveWsSupported}
-              disabled={!liveWsSupported || statusInfo?.live_ws_supported === false}
+              checked={useLiveStream && canLiveStream}
+              disabled={!canLiveStream}
               onChange={(e) => onToggleLiveStream(e.target.checked)}
             />
-            Enable Real-Time Assistant Gemini 3.8 Live Voice Mode (/ws/live)
-            {(!liveWsSupported || statusInfo?.live_ws_supported === false) &&
-              " (unavailable on serverless; using Push-to-Talk + Cloud REST)"}
+            Enable Real-Time Assistant Gemini 3.8 Live Voice Mode
+            {!canLiveStream
+              ? " (requires Gemini API Key; using Push-to-Talk)"
+              : !liveWsSupported && liveEphemeralSupported
+              ? " (Direct Cloud Live via Ephemeral Token)"
+              : " (/ws/live)"}
           </label>
 
           <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: "0.86rem" }}>

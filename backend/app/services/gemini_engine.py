@@ -22,6 +22,7 @@ class GeminiKhataEngine:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
         self._client: Any | None = None
+        self._cooldown_until: dict[str, float] = {}
 
     def _get_client(self):
         if not self.settings.has_gemini:
@@ -34,11 +35,21 @@ class GeminiKhataEngine:
                 api_key=self.settings.gemini_api_key,
                 http_options=types.HttpOptions(
                     api_version=self.settings.gemini_api_version,
-                    timeout=4500,
+                    timeout=9500,
                     retry_options=types.HttpRetryOptions(attempts=1),
                 ),
             )
         return self._client
+
+    def _is_cooled_down(self, model_id: str) -> bool:
+        return time.monotonic() < self._cooldown_until.get(model_id, 0.0)
+
+    def _record_failure_cooldown(self, model_id: str, exc: Exception) -> None:
+        msg = f"{type(exc).__name__} {exc}".lower()
+        if "429" in msg or "ratelimit" in msg or "quota" in msg or "404" in msg or "notfound" in msg:
+            self._cooldown_until[model_id] = time.monotonic() + 300.0
+        elif "503" in msg or "unavailable" in msg or "internalserver" in msg:
+            self._cooldown_until[model_id] = time.monotonic() + 45.0
 
     def _build_context_prompt(
         self,
@@ -95,13 +106,15 @@ class GeminiKhataEngine:
         system_instruction: str,
         input_payload: Any,
         *,
-        deadline_sec: float = 7.2,
+        deadline_sec: float = 11.0,
     ) -> tuple[VoiceTurnPlan, str]:
-        """Try prioritized Gemini models in order within a serverless-safe time budget."""
+        """Try prioritized Gemini models in order, skipping recently rate-limited/unavailable models."""
         last_exc: Exception | None = None
         seen: set[tuple[str, str | None]] = set()
+        active = [(m, t) for m, t in candidates if not self._is_cooled_down(m)]
+        ordered = active or candidates[-1:]
         t_start = time.monotonic()
-        for idx, (model_id, thinking_level) in enumerate(candidates):
+        for idx, (model_id, thinking_level) in enumerate(ordered):
             if (model_id, thinking_level) in seen:
                 continue
             if idx > 0 and (time.monotonic() - t_start) > deadline_sec:
@@ -111,6 +124,7 @@ class GeminiKhataEngine:
                 return self._call_model(model_id, thinking_level, system_instruction, input_payload), model_id
             except Exception as exc:
                 last_exc = exc
+                self._record_failure_cooldown(model_id, exc)
                 logger.warning("Gemini model %s failed (%s): %s", model_id, type(exc).__name__, exc)
         assert last_exc is not None
         raise last_exc
@@ -174,11 +188,17 @@ class GeminiKhataEngine:
         # Default fast tier with resilient 503/429 fallback across Flash -> Flash-Lite -> 3.5 Flash
         plan, model_used = self._call_with_fallback(fast_candidates, system_prompt, input_payload)
 
-        # Escalate to flagship Gemini 4 Argon when confidence is low or ambiguity arises (fail-soft on quota)
-        should_escalate = ai_mode == "cascaded" and (
-            plan.confidence < self.settings.escalation_confidence_threshold
-            or plan.intent == "unknown"
-            or any(op.direction_ambiguous or bool(op.ambiguous_amounts) for op in plan.operations)
+        # Escalate to flagship Gemini 4 Argon when confidence is low or ambiguity arises (skip if cooled down)
+        has_conv_answer = plan.intent in ("greeting", "unknown") and bool((plan.clarification_question or "").strip()) and not plan.needs_clarification
+        should_escalate = (
+            ai_mode == "cascaded"
+            and not has_conv_answer
+            and not self._is_cooled_down(self.settings.gemini_pro_model)
+            and (
+                plan.confidence < self.settings.escalation_confidence_threshold
+                or plan.intent == "unknown"
+                or any(op.direction_ambiguous or bool(op.ambiguous_amounts) for op in plan.operations)
+            )
         )
         if should_escalate and (time.monotonic() - t_total) < 4.5:
             try:
@@ -186,6 +206,7 @@ class GeminiKhataEngine:
                 if pro_plan.confidence >= plan.confidence:
                     return pro_plan, f"{model_used} -> {self.settings.gemini_pro_model}"
             except Exception as exc:
+                self._record_failure_cooldown(self.settings.gemini_pro_model, exc)
                 logger.info("Escalation skipped (%s): %s", type(exc).__name__, exc)
 
         return plan, model_used

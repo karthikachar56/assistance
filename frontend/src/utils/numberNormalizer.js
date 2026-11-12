@@ -56,8 +56,22 @@ export function previewSpokenAmount(input) {
   const tokens = ascii.toLowerCase().replace(/-/g, " ").match(/[a-z]+/g);
   if (!tokens) return null;
 
+  const ENGLISH_DO_PREV = new Set(["can", "to", "you", "i", "we", "they", "how", "what", "why", "will", "would", "should", "could", "did", "not", "please"]);
+  const ENGLISH_DO_NEXT = new Set(["you", "this", "that", "it", "not", "so", "more", "for", "with", "now", "today"]);
+
   const numTokens = tokens.filter((t, idx) => {
     if (t === "so") return idx > 0 && tokens[idx - 1] in WORD_MAP;
+    if (t === "do") {
+      const prev = idx > 0 ? tokens[idx - 1] : "";
+      const next = idx + 1 < tokens.length ? tokens[idx + 1] : "";
+      if (next in SCALES || prev in SCALES || next === "rupaye" || next === "rupees" || next === "rs") {
+        return true;
+      }
+      if (ENGLISH_DO_PREV.has(prev) || ENGLISH_DO_NEXT.has(next)) {
+        return false;
+      }
+      return next in WORD_MAP || prev in WORD_MAP;
+    }
     return t in WORD_MAP || t in SCALES || t in FRACTIONS;
   });
   if (numTokens.length === 0) return null;

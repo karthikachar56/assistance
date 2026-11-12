@@ -170,6 +170,22 @@ def _match_known_customer_in_clause(clause: str, known_customer_names: list[str]
     return None
 
 
+def _match_known_customers_in_query(clause: str, known_customer_names: list[str] | None) -> list[str]:
+    if not known_customer_names:
+        return []
+    low = clause.lower()
+    hits: list[tuple[int, str]] = []
+    occupied: list[tuple[int, int]] = []
+    for known in sorted(known_customer_names, key=len, reverse=True):
+        m = re.search(rf"\b{re.escape(known.lower())}\b", low)
+        if m:
+            if not any(m.start() < e and m.end() > s for s, e in occupied):
+                hits.append((m.start(), known))
+                occupied.append((m.start(), m.end()))
+    hits.sort(key=lambda item: item[0])
+    return [name for _, name in hits]
+
+
 def _extract_customer_name_from_clause(
     clause: str,
     amount_spans: list[tuple[int, int]],
@@ -467,6 +483,38 @@ def try_fast_path(
             transcript=text,
             intent="greeting",
             confidence=0.95,
+            detected_language=language,
+        )
+
+    if not pending_action and any(
+        p in low for p in ("sunai de raha", "sunayi de raha", "can you hear", "hear me", "am i audible")
+    ):
+        reply_map = {
+            "kn-IN": "ಹೌದು ಸರ್, ನಿಮ್ಮ ಧ್ವನಿ ಸ್ಪಷ್ಟವಾಗಿ ಕೇಳಿಸುತ್ತಿದೆ! ದಯವಿಟ್ಟು ಖಾತೆ ವಿವರ ಹೇಳಿ.",
+            "en-IN": "Yes sir, I can hear you clearly! Tell me which credit, payment, or balance check you want.",
+            "hi-IN": "Haan bilkul sir, aapki awaaz bilkul saaf aa rahi hai! Boliye kya udhaar ya hisaab likhna hai?",
+        }
+        return VoiceTurnPlan(
+            transcript=text,
+            intent="greeting",
+            confidence=0.96,
+            clarification_question=reply_map.get(language, reply_map["hi-IN"]),
+            detected_language=language,
+        )
+
+    if not pending_action and any(
+        p in low for p in ("what can you do", "what all can you do", "explain briefly what you can do", "kya kar sakte")
+    ):
+        reply_map = {
+            "kn-IN": "ಸರ್, ನಾನು ಧ್ವನಿಯ ಮೂಲಕ ಉದಾರ್ ಮತ್ತು ಪೇಮೆಂಟ್ ದಾಖಲಿಸಬಲ್ಲೆ, ಗ್ರಾಹಕರ ಬಾಕಿ ತೋರಿಸಬಲ್ಲೆ ಮತ್ತು ಇಂದಿನ ಒಟ್ಟು ಲೆಕ್ಕ ಹೇಳಬಲ್ಲೆ.",
+            "en-IN": "Sir, I can record customer credit (udhaar) and payments by voice, check daily totals, show balances, and add or edit customers.",
+            "hi-IN": "Sir, main voice se customer udhaar aur payment likh sakta hoon, aaj ka hisaab aur baaki balance bata sakta hoon, aur customer add/edit kar sakta hoon.",
+        }
+        return VoiceTurnPlan(
+            transcript=text,
+            intent="greeting",
+            confidence=0.96,
+            clarification_question=reply_map.get(language, reply_map["hi-IN"]),
             detected_language=language,
         )
 
@@ -781,6 +829,21 @@ def try_fast_path(
                 intent="query_ledger",
                 query=ExtractedQuery(kind="total_outstanding"),
                 confidence=0.96,
+                detected_language=language,
+            )
+
+        multi_names = _match_known_customers_in_query(text, known_customer_names)
+        if len(multi_names) >= 2:
+            kind = (
+                "customer_history"
+                if any(h in low for h in ("history", "entries", "last", "recent", "detail", "details", "ledger", "statement", "transactions", "pichhle"))
+                else "customer_balance"
+            )
+            return VoiceTurnPlan(
+                transcript=text,
+                intent="query_ledger",
+                query=ExtractedQuery(kind=kind, customer_name=", ".join(multi_names), date_phrase=date_phrase),
+                confidence=0.94,
                 detected_language=language,
             )
 

@@ -82,6 +82,24 @@ export const api = {
     return request("/api/voice/audio", { method: "POST", body: fd });
   },
   voiceHistory: () => request("/api/voice/history"),
+  voiceTts: (payload) =>
+    request("/api/voice/tts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
+  liveToken: (payload) =>
+    request("/api/voice/live-token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
+  liveTool: (payload) =>
+    request("/api/voice/live-tool", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
   auditLogs: () => request("/api/audit"),
   updateSettings: (payload) =>
     request("/api/settings", {

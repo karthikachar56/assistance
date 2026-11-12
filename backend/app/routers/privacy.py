@@ -20,6 +20,7 @@ def get_system_status(container: AppContainer = Depends(get_container)) -> dict:
         "gemini_configured": container.settings.has_gemini,
         "gnani_configured": container.gnani.is_available,
         "live_ws_supported": not container.settings.is_serverless,
+        "live_ephemeral_supported": container.settings.has_gemini,
         "database_backend": container.db.backend_name,
         "database_name": container.db.database_label,
         "storage_fallback_reason": container.storage_fallback_reason,

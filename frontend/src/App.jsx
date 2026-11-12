@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Mic, MicOff, PanelRightOpen, Radio, Send } from "lucide-react";
 import { api, enqueueOfflineTurn, flushOfflineQueue, getOfflineQueue } from "./api/client";
+import { EphemeralGeminiLiveClient } from "./audio/ephemeralLiveClient";
 import { GeminiLiveClient } from "./audio/liveClient";
 import { ShopAudioRecorder, playReplyAudio } from "./audio/recorder";
 import { ConsentBanner } from "./components/ConsentBanner";
@@ -67,10 +68,18 @@ export default function App() {
   const tabRef = useRef("home");
   const turnNavigatedRef = useRef(false);
   const highlightTimerRef = useRef(null);
+  const hasLoadedPrimarySettingsRef = useRef(false);
+  const silenceTimerRef = useRef(null);
+  const pttSpeechDetectedRef = useRef(false);
+  const pttStoppingRef = useRef(false);
+  const runtimeStateRef = useRef({});
+  runtimeStateRef.current = { language, aiMode, interactiveConfirm, useDirectAudio, statusInfo };
 
   const isVercelHost =
     typeof window !== "undefined" && /(?:^|\.)vercel\.app$/i.test(window.location.hostname);
   const liveWsSupported = Boolean(!isVercelHost && statusInfo?.live_ws_supported === true);
+  const liveEphemeralSupported = Boolean(statusInfo?.gemini_configured && statusInfo?.live_ephemeral_supported);
+  const canLiveStream = Boolean(statusInfo?.gemini_configured && (liveWsSupported || liveEphemeralSupported));
 
   function updateLastTurn(turn) {
     lastTurnRef.current = turn;
@@ -120,22 +129,27 @@ export default function App() {
       }
 
       const s = st.settings || {};
-      if (s.preferred_language) setLanguage(s.preferred_language);
-      if (s.ai_mode) setAiMode(s.ai_mode);
-      if (s.speech_provider) setSpeechProvider(s.speech_provider);
-      setEphemeral(s.ephemeral_transcripts === "true");
-      setConsentAccepted(s.dpdp_consent_accepted === "true");
+      const isFallbackContainer = Boolean(st.storage_fallback_reason);
+      if (!isFallbackContainer) {
+        hasLoadedPrimarySettingsRef.current = true;
+      }
+      if (!hasLoadedPrimarySettingsRef.current || !isFallbackContainer) {
+        if (s.preferred_language) setLanguage(s.preferred_language);
+        if (s.ai_mode) setAiMode(s.ai_mode);
+        if (s.speech_provider) setSpeechProvider(s.speech_provider);
+        setEphemeral(s.ephemeral_transcripts === "true");
+        setConsentAccepted(s.dpdp_consent_accepted === "true");
+      }
+      const statusCanLive = Boolean(
+        st.gemini_configured && ((!isVercelHost && st.live_ws_supported === true) || st.live_ephemeral_supported)
+      );
       if (!initializedAudioPrefRef.current) {
         initializedAudioPrefRef.current = true;
         if (st.gemini_configured || st.gnani_configured) {
           setUseDirectAudio(true);
         }
-        if (!isVercelHost && st.gemini_configured && st.live_ws_supported !== false) {
-          setUseLiveStream(true);
-        } else {
-          setUseLiveStream(false);
-        }
-      } else if (isVercelHost || st.live_ws_supported === false) {
+        setUseLiveStream(statusCanLive);
+      } else if (!statusCanLive) {
         stopLiveSession();
         setUseLiveStream(false);
       }
@@ -167,6 +181,7 @@ export default function App() {
     return () => {
       window.removeEventListener("online", onOnline);
       window.removeEventListener("offline", onOffline);
+      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
       liveClientRef.current?.stop();
     };
   }, []);
@@ -244,7 +259,7 @@ export default function App() {
     const clean = phrase.trim();
     if (!clean) return;
     setLiveUserText(clean);
-    if (useLiveStream && liveWsSupported && liveConnected && liveClientRef.current?.sendText(clean)) {
+    if (useLiveStream && canLiveStream && liveConnected && liveClientRef.current?.sendText(clean)) {
       appendConversation("user", clean);
       setTextDraft("");
       return;
@@ -290,12 +305,127 @@ export default function App() {
     }
   }
 
+  function clearPttSilenceTimer() {
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+  }
+
+  function armPttSilenceTimer(delayMs = 1250) {
+    clearPttSilenceTimer();
+    silenceTimerRef.current = setTimeout(() => {
+      if (recorderRef.current && pttSpeechDetectedRef.current && !pttStoppingRef.current) {
+        finalizePushToTalkRecording();
+      }
+    }, delayMs);
+  }
+
+  async function finalizePushToTalkRecording() {
+    if (pttStoppingRef.current || !recorderRef.current) return;
+    pttStoppingRef.current = true;
+    clearPttSilenceTimer();
+    pttSpeechDetectedRef.current = false;
+    setIsRecording(false);
+    setMicLevel(0);
+    const activeRecorder = recorderRef.current;
+    recorderRef.current = null;
+    try {
+      const rt = runtimeStateRef.current;
+      const result = await activeRecorder.stop();
+      const canUploadAudio = rt.useDirectAudio && (rt.statusInfo?.gemini_configured || rt.statusInfo?.gnani_configured);
+      if (canUploadAudio) {
+        setIsProcessing(true);
+        try {
+          const res = await api.voiceTurnAudio({
+            blob: result.wavBlob,
+            sessionId,
+            language: rt.language,
+            aiMode: rt.aiMode,
+            includeTts: true,
+            fallbackTranscript: result.browserTranscript,
+            interactiveConfirm: rt.interactiveConfirm,
+            pendingAction: lastTurnRef.current?.pending_action || null,
+            lastCommittedTxIds: (lastTurnRef.current?.transactions || []).map((t) => t.id),
+          });
+          updateLastTurn(res);
+          setLiveUserText(res.transcript);
+          setLiveTranscriptNote(res.spoken_reply);
+          appendConversation("user", res.transcript);
+          appendConversation("ai", res.spoken_reply);
+          setTextDraft("");
+          playReplyAudio({
+            audioBase64: res.audio_base64,
+            audioMimeType: res.audio_mime_type,
+            text: res.spoken_reply,
+            language: rt.language,
+          });
+          await applyTurnUiEffects(res, res.transcript);
+        } catch (err) {
+          if (result.browserTranscript) {
+            await runTextTurn(result.browserTranscript);
+          } else {
+            setErrorMsg(err.message);
+          }
+        } finally {
+          setIsProcessing(false);
+        }
+      } else if (result.browserTranscript) {
+        await runTextTurn(result.browserTranscript);
+      } else {
+        setErrorMsg("No speech transcript detected. Check mic permission or type your command below.");
+      }
+    } finally {
+      pttStoppingRef.current = false;
+    }
+  }
+
+  async function handleReplayAudio(turn) {
+    if (!turn?.spoken_reply) return;
+    if (turn.audio_base64) {
+      playReplyAudio({
+        audioBase64: turn.audio_base64,
+        audioMimeType: turn.audio_mime_type,
+        text: turn.spoken_reply,
+        language,
+      });
+      return;
+    }
+    if (statusInfo?.gemini_configured || statusInfo?.gnani_configured) {
+      try {
+        const ttsRes = await api.voiceTts({ text: turn.spoken_reply, language });
+        if (ttsRes?.audio_base64) {
+          updateLastTurn({
+            ...turn,
+            audio_base64: ttsRes.audio_base64,
+            audio_mime_type: ttsRes.audio_mime_type || "audio/wav",
+          });
+          playReplyAudio({
+            audioBase64: ttsRes.audio_base64,
+            audioMimeType: ttsRes.audio_mime_type || "audio/wav",
+            text: turn.spoken_reply,
+            language,
+          });
+          return;
+        }
+      } catch {
+        // fallback below to browser speechSynthesis
+      }
+    }
+    playReplyAudio({
+      audioBase64: null,
+      audioMimeType: null,
+      text: turn.spoken_reply,
+      language,
+    });
+  }
+
   async function toggleMic() {
-    if (useLiveStream && !liveWsSupported) {
+    if (useLiveStream && !canLiveStream) {
       stopLiveSession();
       setUseLiveStream(false);
     }
-    if (useLiveStream && liveWsSupported) {
+    if (useLiveStream && canLiveStream) {
       if (liveConnected || liveConnecting) {
         stopLiveSession();
         setLiveTranscriptNote("");
@@ -308,7 +438,7 @@ export default function App() {
         liveAiAccumRef.current = "";
         liveUserAccumRef.current = "";
 
-        const client = new GeminiLiveClient();
+        const client = liveWsSupported ? new GeminiLiveClient() : new EphemeralGeminiLiveClient();
         liveClientRef.current = client;
 
         // Acquire microphone & unlock AudioContext synchronously inside user click gesture
@@ -402,15 +532,27 @@ export default function App() {
 
     if (!isRecording) {
       try {
+        clearPttSilenceTimer();
+        pttSpeechDetectedRef.current = false;
         const rec = new ShopAudioRecorder();
         recorderRef.current = rec;
         setLiveUserText("");
         await rec.start({
           language,
-          onLevel: (lvl) => setMicLevel(lvl),
+          onLevel: (lvl) => {
+            setMicLevel(lvl);
+            if (lvl > 0.045) {
+              pttSpeechDetectedRef.current = true;
+              armPttSilenceTimer(1400);
+            }
+          },
           onInterimTranscript: (t) => {
             setTextDraft(t);
             setLiveUserText(t);
+            if (t && t.trim()) {
+              pttSpeechDetectedRef.current = true;
+              armPttSilenceTimer(1250);
+            }
           },
         });
         setIsRecording(true);
@@ -419,55 +561,7 @@ export default function App() {
         setErrorMsg(`Microphone error: ${err.message}`);
       }
     } else {
-      setIsRecording(false);
-      setMicLevel(0);
-      const result = await recorderRef.current.stop();
-      const canUploadAudio = useDirectAudio && (statusInfo?.gemini_configured || statusInfo?.gnani_configured);
-      if (canUploadAudio) {
-        setIsProcessing(true);
-        try {
-          const res = await api.voiceTurnAudio({
-            blob: result.wavBlob,
-            sessionId,
-            language,
-            aiMode,
-            includeTts: true,
-            fallbackTranscript: result.browserTranscript,
-            interactiveConfirm,
-            pendingAction: lastTurnRef.current?.pending_action || null,
-            lastCommittedTxIds: (lastTurnRef.current?.transactions || []).map((t) => t.id),
-          });
-          updateLastTurn(res);
-          setLiveUserText(res.transcript);
-          setLiveTranscriptNote(res.spoken_reply);
-          appendConversation("user", res.transcript);
-          appendConversation("ai", res.spoken_reply);
-          setTextDraft("");
-          playReplyAudio({
-            audioBase64: res.audio_base64,
-            audioMimeType: res.audio_mime_type,
-            text: res.spoken_reply,
-            language,
-          });
-          await applyTurnUiEffects(res, res.transcript);
-        } catch (err) {
-          if (result.browserTranscript) {
-            await runTextTurn(result.browserTranscript);
-          } else {
-            setErrorMsg(err.message);
-          }
-        } finally {
-          setIsProcessing(false);
-        }
-      } else if (result.browserTranscript) {
-        await runTextTurn(result.browserTranscript);
-      } else {
-        setErrorMsg(
-          liveWsSupported
-            ? "No speech transcript detected. Check mic permission, type below, or enable Live Voice Mode."
-            : "No speech transcript detected. Check mic permission or type your command below."
-        );
-      }
+      await finalizePushToTalkRecording();
     }
   }
 
@@ -523,10 +617,11 @@ export default function App() {
           aiSpeaking={aiSpeaking}
           isRecording={isRecording}
           isProcessing={isProcessing}
-          useLiveStream={useLiveStream && liveWsSupported}
+          useLiveStream={useLiveStream && canLiveStream}
           interactiveConfirm={interactiveConfirm}
           geminiConfigured={Boolean(statusInfo?.gemini_configured)}
           liveWsSupported={liveWsSupported}
+          canLiveStream={canLiveStream}
           micLevel={micLevel}
           micInfo={micInfo}
           liveUserText={liveUserText}
@@ -537,7 +632,7 @@ export default function App() {
           language={language}
           onToggleMic={toggleMic}
           onToggleLiveStream={(enabled) => {
-            if (!enabled || !liveWsSupported) {
+            if (!enabled || !canLiveStream) {
               stopLiveSession();
               setUseLiveStream(false);
               return;
@@ -551,6 +646,7 @@ export default function App() {
             }
           }}
           onQuickReply={runTextTurn}
+          onReplayAudio={handleReplayAudio}
         />
 
         <div className="ai-dock-card">
@@ -560,12 +656,12 @@ export default function App() {
               onClick={toggleMic}
               disabled={isProcessing}
               title={
-                useLiveStream && liveWsSupported
+                useLiveStream && canLiveStream
                   ? "Toggle Gemini 3.8 Live Stream"
-                  : "Tap to speak / tap again to stop"
+                  : "Tap to speak (auto-sends when you pause) or tap again to send now"
               }
             >
-              {useLiveStream && liveWsSupported ? (
+              {useLiveStream && canLiveStream ? (
                 <Radio size={22} />
               ) : isRecording ? (
                 <MicOff size={22} />
@@ -583,6 +679,8 @@ export default function App() {
             >
               <div style={{ flex: 1, minWidth: 0 }}>
                 <input
+                  id="khata-command-input"
+                  name="command_transcript"
                   className="text-input"
                   value={textDraft}
                   onChange={(e) => setTextDraft(e.target.value)}
@@ -713,13 +811,15 @@ export default function App() {
             speechProvider={speechProvider}
             ephemeral={ephemeral}
             useDirectAudio={useDirectAudio}
-            useLiveStream={useLiveStream && liveWsSupported}
+            useLiveStream={useLiveStream && canLiveStream}
             liveWsSupported={liveWsSupported}
+            liveEphemeralSupported={liveEphemeralSupported}
+            canLiveStream={canLiveStream}
             interactiveConfirm={interactiveConfirm}
             onUpdateSetting={handleUpdateSettings}
             onToggleDirectAudio={setUseDirectAudio}
             onToggleLiveStream={(enabled) => {
-              if (!enabled || !liveWsSupported) {
+              if (!enabled || !canLiveStream) {
                 stopLiveSession();
                 setUseLiveStream(false);
                 return;

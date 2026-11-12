@@ -436,6 +436,38 @@ class LedgerEngine:
                 hi="Kis customer ka hisaab check karna hai?",
             )
             return reply, "customers", None, None, False, [], []
+        if "," in query.customer_name:
+            requested_names = [part.strip() for part in query.customer_name.split(",") if part.strip()]
+            parts_reply: list[str] = []
+            combined_txs: list[TransactionOut] = []
+            combined_breakdown: list[CustomerBreakdownItem] = []
+            for req_name in requested_names:
+                m = resolve_customer(self.db, req_name)
+                if not m.matched:
+                    continue
+                cust_i = m.matched
+                cid_i = int(cust_i["id"])
+                bal_i = self._compute_customer_balance(cid_i)
+                rows_i = [self._row_to_tx_out(r) for r in self.db.list_customer_transactions(cid_i)[:6]]
+                combined_txs.extend(rows_i[:3])
+                combined_breakdown.append(
+                    CustomerBreakdownItem(customer_id=cid_i, customer_name=cust_i["name"], amount=bal_i, tx_count=len(rows_i))
+                )
+                if query.kind == "customer_history" and rows_i:
+                    latest = rows_i[0]
+                    parts_reply.append(f"{cust_i['name']} (balance ₹{_fmt_inr(bal_i)}; latest ₹{_fmt_inr(latest.amount)} {latest.tx_type} on {latest.transaction_date})")
+                else:
+                    parts_reply.append(f"{cust_i['name']} ₹{_fmt_inr(bal_i)}")
+            if parts_reply:
+                joined_parts = "; ".join(parts_reply)
+                reply = _pick_lang(
+                    language,
+                    en=f"Sir, here are the details: {joined_parts}.",
+                    kn=f"ಸರ್, ವಿವರಗಳು ಹೀಗಿವೆ: {joined_parts}.",
+                    hi=f"Sir, details yeh hain: {joined_parts}.",
+                )
+                return reply, "customers", None, None, False, combined_txs, combined_breakdown
+
         match = resolve_customer(self.db, query.customer_name)
         if match.status == "none":
             reply = _pick_lang(
@@ -791,9 +823,9 @@ class LedgerEngine:
                     )
                     status = "needs_disambiguation"
 
-            # Case B2: Friendly Greeting
+            # Case B2: Friendly Greeting & Conversational Check-ins
             elif plan.intent == "greeting":
-                spoken_reply = _pick_lang(
+                spoken_reply = (plan.clarification_question or "").strip() or _pick_lang(
                     language,
                     en="Namaste, sir! Tell me a credit or payment entry, or ask about today's khata.",
                     kn="ನಮಸ್ಕಾರ ಸರ್! ಉದಾರ್ ಅಥವಾ ಪೇಮೆಂಟ್ ಎಂಟ್ರಿ ಹೇಳಿ, ಅಥವಾ ಇಂದಿನ ಖಾತೆ ವಿವರ ಕೇಳಿ.",
