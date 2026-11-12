@@ -585,7 +585,7 @@ class LedgerEngine:
             # Case A2: Direct Page / Customer Navigation
             elif plan.intent == "navigate_page":
                 page = plan.target_page or "home"
-                if page not in ("home", "customers", "settings"):
+                if page not in ("home", "customers", "ledgers", "settings"):
                     page = "home"
                 navigate_tab = page
                 if plan.selected_customer:
@@ -598,6 +598,7 @@ class LedgerEngine:
                 page_labels = {
                     "home": "Khata Dashboard",
                     "customers": "Customers Details",
+                    "ledgers": "All Customer Ledgers",
                     "settings": "Settings",
                 }
                 if open_customer_details and highlight_customer_name:

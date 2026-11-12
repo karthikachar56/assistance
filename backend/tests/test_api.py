@@ -325,4 +325,32 @@ def test_gemini_engine_cooldown_and_mongo_fallback_healing(isolated_container, m
     deps_mod.set_container(None)
 
 
+def test_all_transactions_endpoint_and_ledgers_navigation(api_client):
+    customers = api_client.get("/api/customers").json()
+    all_txs = api_client.get("/api/transactions").json()
+    assert len(all_txs) >= len(customers)
+    assert all(tx["status"] != "voided" for tx in all_txs)
+    customer_ids_with_txs = {tx["customer_id"] for tx in all_txs}
+    assert len(customer_ids_with_txs) >= 2
+
+    target_cust = customers[0]
+    filtered = api_client.get(f"/api/transactions?customer_id={target_cust['id']}").json()
+    per_cust = api_client.get(f"/api/customers/{target_cust['id']}/transactions").json()
+    assert filtered == per_cust
+
+    nav = api_client.post(
+        "/api/voice/turn",
+        json={
+            "session_id": "nav-ledgers",
+            "transcript": "Open customer ledgers",
+            "language": "en-IN",
+            "ai_mode": "offline",
+            "include_tts": False,
+        },
+    )
+    assert nav.status_code == 200
+    assert nav.json()["navigate_tab"] == "ledgers"
+
+
+
 

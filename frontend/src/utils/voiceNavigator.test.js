@@ -39,7 +39,13 @@ describe("inferNavigationFromText", () => {
     });
   });
 
-  it("opens Khata and Settings pages without Voice Log option", () => {
+  it("opens Khata, Customer Ledgers, and Settings pages without Voice Log option", () => {
+    expect(inferNavigationFromText("Open customer ledgers", SAMPLE_CUSTOMERS)).toEqual({
+      tab: "ledgers",
+      openCustomerId: null,
+      openCustomerName: null,
+    });
+    expect(inferNavigationFromText("Show every customer transactions", SAMPLE_CUSTOMERS)?.tab).toBe("ledgers");
     expect(inferNavigationFromText("Open settings", SAMPLE_CUSTOMERS)?.tab).toBe("settings");
     expect(inferNavigationFromText("Open dashboard", SAMPLE_CUSTOMERS)?.tab).toBe("home");
     expect(inferNavigationFromText("Who took credit today?", SAMPLE_CUSTOMERS)?.tab).toBe("home");

@@ -96,6 +96,7 @@ class KhataStore(Protocol):
     def get_customer_balance(self, customer_id: int) -> float: ...
     def get_dashboard_summary(self, today_str: str, recent_limit: int = 12) -> dict: ...
     def list_customer_transactions(self, customer_id: int) -> list[dict]: ...
+    def list_all_transactions(self) -> list[dict]: ...
     def get_customer_recent_confirmed_transactions(self, customer_id: int, limit: int = 3) -> list[dict]: ...
     def list_date_transactions(self, tx_type: str | None, target_date: str) -> list[dict]: ...
 
@@ -455,6 +456,19 @@ class SqliteKhataStore:
                 ORDER BY t.transaction_date DESC, t.id DESC
                 """,
                 (customer_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def list_all_transactions(self) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT t.*, c.name AS customer_name
+                FROM transactions t
+                JOIN customers c ON c.id = t.customer_id
+                WHERE t.status != 'voided'
+                ORDER BY t.transaction_date DESC, t.id DESC
+                """
             ).fetchall()
             return [dict(r) for r in rows]
 
@@ -1095,6 +1109,21 @@ class MongoKhataStore:
             doc = _clean_doc(raw)
             if doc is not None:
                 doc["customer_name"] = cust["name"]
+                out.append(doc)
+        return out
+
+    def list_all_transactions(self) -> list[dict]:
+        names = self._customer_name_map()
+        docs = (
+            self.mongo_db["transactions"]
+            .find({"status": {"$ne": "voided"}}, {"_id": 0})
+            .sort([("transaction_date", DESCENDING), ("id", DESCENDING)])
+        )
+        out = []
+        for raw in docs:
+            doc = _clean_doc(raw)
+            if doc is not None and int(doc["customer_id"]) in names:
+                doc["customer_name"] = names[int(doc["customer_id"])]
                 out.append(doc)
         return out
 

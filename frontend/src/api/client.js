@@ -35,6 +35,8 @@ export const api = {
     }),
   deleteCustomer: (id) => request(`/api/customers/${id}`, { method: "DELETE" }),
   customerTransactions: (id) => request(`/api/customers/${id}/transactions`),
+  transactions: (customerId = null) =>
+    request(customerId != null ? `/api/transactions?customer_id=${customerId}` : "/api/transactions"),
   manualTransaction: (payload) =>
     request("/api/transactions", {
       method: "POST",

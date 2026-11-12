@@ -6,6 +6,7 @@ import { GeminiLiveClient } from "./audio/liveClient";
 import { ShopAudioRecorder, playReplyAudio } from "./audio/recorder";
 import { ConsentBanner } from "./components/ConsentBanner";
 import { CustomerLedgerModal } from "./components/CustomerLedgerModal";
+import { CustomerLedgersScreen } from "./components/CustomerLedgersScreen";
 import { CustomersScreen } from "./components/CustomersScreen";
 import { DashboardScreen } from "./components/DashboardScreen";
 import { JarvisHud } from "./components/JarvisHud";
@@ -22,9 +23,17 @@ export default function App() {
   useEffect(() => {
     setDrawerOpen(false);
   }, [tab]);
+
+  function navigateToTab(nextTab) {
+    setTab(nextTab);
+    setDrawerOpen(false);
+    refreshAll();
+  }
   const [statusInfo, setStatusInfo] = useState(null);
   const [dashboard, setDashboard] = useState(null);
   const [customers, setCustomers] = useState([]);
+  const [allTransactions, setAllTransactions] = useState([]);
+  const [focusLedgersCustId, setFocusLedgersCustId] = useState(null);
   const [lastTurn, setLastTurn] = useState(null);
   const [selectedCustomer, setSelectedCustomer] = useState(null);
   const [selectedCustomerTxs, setSelectedCustomerTxs] = useState([]);
@@ -109,14 +118,16 @@ export default function App() {
 
   async function refreshAll(searchQuery = "") {
     try {
-      const [st, dash, custs] = await Promise.all([
+      const [st, dash, custs, allTxs] = await Promise.all([
         api.status(),
         api.dashboard(),
         api.customers(searchQuery),
+        api.transactions(),
       ]);
       setStatusInfo(st);
       setDashboard(dash);
       setCustomers(custs);
+      setAllTransactions(allTxs);
       customersRef.current = custs;
 
       if (selectedCustomerIdRef.current != null) {
@@ -585,9 +596,35 @@ export default function App() {
     await refreshAll();
   }
 
+  async function handleCreateCustomer(payload) {
+    const created = await api.createCustomer(payload);
+    if (created?.id != null) {
+      setLiveHighlightCustId(created.id);
+      scheduleClearHighlights();
+    }
+    await refreshAll();
+  }
+
   async function handleUpdateCustomer(id, payload) {
     await api.updateCustomer(id, payload);
     setLiveHighlightCustId(id);
+    scheduleClearHighlights();
+    await refreshAll();
+  }
+
+  async function handleToggleOptIn(customer) {
+    await api.updateCustomer(customer.id, { reminder_opt_in: !customer.reminder_opt_in });
+    await refreshAll();
+  }
+
+  async function handleManualTx(payload) {
+    const tx = await api.manualTransaction(payload);
+    if (tx?.id != null) {
+      setLiveHighlightTxIds([tx.id]);
+    }
+    if (payload?.customer_id != null) {
+      setLiveHighlightCustId(payload.customer_id);
+    }
     scheduleClearHighlights();
     await refreshAll();
   }
@@ -759,6 +796,15 @@ export default function App() {
           highlightTxIds={liveHighlightTxIds}
           onUpdateCustomer={handleUpdateCustomer}
           onDeleteCustomer={handleDeleteCustomer}
+          onOpenInLedgers={(cust) => {
+            selectedCustomerIdRef.current = null;
+            setSelectedCustomer(null);
+            setSelectedCustomerTxs([]);
+            setFocusLedgersCustId(cust.id);
+            setLiveHighlightCustId(cust.id);
+            scheduleClearHighlights();
+            navigateToTab("ledgers");
+          }}
           onClose={() => {
             selectedCustomerIdRef.current = null;
             setSelectedCustomer(null);
@@ -774,10 +820,7 @@ export default function App() {
             language={language}
             liveHighlightTxIds={liveHighlightTxIds}
             onRunPhrase={runTextTurn}
-            onManualTx={async (payload) => {
-              await api.manualTransaction(payload);
-              await refreshAll();
-            }}
+            onManualTx={handleManualTx}
             onSelectCustomerById={(id) => openCustomerLedgerById(id)}
           />
         )}
@@ -788,18 +831,31 @@ export default function App() {
             language={language}
             highlightCustomerId={liveHighlightCustId}
             onSearch={(q) => refreshAll(q)}
-            onCreateCustomer={async (payload) => {
-              await api.createCustomer(payload);
-              await refreshAll();
-            }}
+            onCreateCustomer={handleCreateCustomer}
             onUpdateCustomer={handleUpdateCustomer}
             onDeleteCustomer={handleDeleteCustomer}
-            onToggleOptIn={async (c) => {
-              await api.updateCustomer(c.id, { reminder_opt_in: !c.reminder_opt_in });
-              await refreshAll();
-            }}
+            onToggleOptIn={handleToggleOptIn}
             onSendReminder={(id) => api.sendReminder(id, language)}
             onOpenLedger={(c) => openCustomerLedgerById(c.id)}
+            onOpenLedgersPage={() => navigateToTab("ledgers")}
+          />
+        )}
+
+        {tab === "ledgers" && (
+          <CustomerLedgersScreen
+            customers={customers}
+            allTransactions={allTransactions}
+            language={language}
+            highlightCustomerId={liveHighlightCustId}
+            highlightTxIds={liveHighlightTxIds}
+            focusCustomerId={focusLedgersCustId}
+            onClearFocus={() => setFocusLedgersCustId(null)}
+            onManualTx={handleManualTx}
+            onCreateCustomer={handleCreateCustomer}
+            onUpdateCustomer={handleUpdateCustomer}
+            onDeleteCustomer={handleDeleteCustomer}
+            onToggleOptIn={handleToggleOptIn}
+            onSendReminder={(id) => api.sendReminder(id, language)}
           />
         )}
 
@@ -843,10 +899,7 @@ export default function App() {
       <RightSlideDashboard
         open={drawerOpen}
         activeTab={tab}
-        onSelectTab={(nextTab) => {
-          setTab(nextTab);
-          setDrawerOpen(false);
-        }}
+        onSelectTab={navigateToTab}
         onClose={() => setDrawerOpen(false)}
       />
     </div>

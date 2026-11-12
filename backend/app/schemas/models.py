@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 TxType = Literal["credit", "payment"]
 LanguageCode = Literal["hi-IN", "kn-IN", "ta-IN", "te-IN", "en-IN"]
-NavTab = Literal["home", "customers", "settings"]
+NavTab = Literal["home", "customers", "ledgers", "settings"]
 IntentType = Literal[
     "record_transactions",
     "correction",
@@ -92,7 +92,7 @@ class VoiceTurnPlan(BaseModel):
     )
     target_page: NavTab | None = Field(
         default=None,
-        description="UI page to open when intent is 'navigate_page' ('home', 'customers', 'settings')",
+        description="UI page to open when intent is 'navigate_page' ('home', 'customers', 'ledgers', 'settings')",
     )
     new_customer_name: str | None = Field(
         default=None,

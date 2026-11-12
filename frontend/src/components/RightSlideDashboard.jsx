@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from "react";
-import { BookOpen, Settings, Users, X } from "lucide-react";
+import { BookOpen, LayoutGrid, Settings, Users, X } from "lucide-react";
 
 export const NAV_SECTIONS = [
   {
@@ -15,6 +15,12 @@ export const NAV_SECTIONS = [
     Icon: Users,
   },
   {
+    id: "ledgers",
+    label: "Customer Ledgers",
+    subtitle: "Individual blocks & all transactions",
+    Icon: LayoutGrid,
+  },
+  {
     id: "settings",
     label: "Settings",
     subtitle: "Language, Gemini AI & privacy",
@@ -23,7 +29,7 @@ export const NAV_SECTIONS = [
 ];
 
 /**
- * Right-side slide-over navigation drawer holding Khata, Customers, and Settings.
+ * Right-side slide-over navigation drawer holding Khata, Customers, Customer Ledgers, and Settings.
  */
 export function RightSlideDashboard({ open, activeTab, onSelectTab, onClose }) {
   const asideRef = useRef(null);

@@ -336,6 +336,9 @@ def test_mongo_store_end_to_end_ledger_encryption_and_api():
             )
             assert manual_tx.status_code == 201
             assert len(client.get(f"/api/customers/{kiran_id}/transactions").json()) == 1
+            all_txs = client.get("/api/transactions").json()
+            assert len(all_txs) > 1
+            assert any(tx["customer_id"] == kiran_id and tx["customer_name"] == "Kiran Shetty" for tx in all_txs)
 
             suresh = next(c for c in customers if c["name"] == "Suresh Patel")
             assert client.post("/api/reminders/send", json={"customer_id": suresh["id"], "language": "hi-IN"}).status_code == 403

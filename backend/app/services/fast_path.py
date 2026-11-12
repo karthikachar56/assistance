@@ -763,6 +763,22 @@ def try_fast_path(
                 confidence=0.96,
                 detected_language=language,
             )
+        # Explicit per-customer ledger blocks page navigation
+        if any(
+            p in low
+            for p in (
+                "customer ledger", "customer ledgers", "all ledgers", "open ledgers", "ledgers page",
+                "all khatas", "every customer", "each customer", "individual blocks",
+                "individual customer block", "sabhi ka khata", "har customer",
+            )
+        ):
+            return VoiceTurnPlan(
+                transcript=text,
+                intent="navigate_page",
+                target_page="ledgers",
+                confidence=0.97,
+                detected_language=language,
+            )
         # Explicit all-customers / total customer details request
         if any(
             p in low

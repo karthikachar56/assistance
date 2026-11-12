@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Bell, BellOff, Pencil, Search, Trash2, UserPlus } from "lucide-react";
+import { Bell, BellOff, LayoutGrid, Pencil, Search, Trash2, UserPlus } from "lucide-react";
 import { formatINR } from "../utils/numberNormalizer";
 import { CustomerEditForm } from "./CustomerEditForm";
 
@@ -14,6 +14,7 @@ export function CustomersScreen({
   onToggleOptIn,
   onSendReminder,
   onOpenLedger,
+  onOpenLedgersPage,
 }) {
   const [search, setSearch] = useState("");
   const [showAdd, setShowAdd] = useState(false);
@@ -88,6 +89,16 @@ export function CustomersScreen({
               }}
             />
           </div>
+          {onOpenLedgersPage && (
+            <button
+              className="btn btn-secondary"
+              type="button"
+              onClick={onOpenLedgersPage}
+              title="View individual blocks for every customer with all transactions"
+            >
+              <LayoutGrid size={16} /> All Ledgers
+            </button>
+          )}
           <button className="btn btn-primary" onClick={() => setShowAdd((v) => !v)}>
             <UserPlus size={16} /> Add
           </button>

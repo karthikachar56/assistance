@@ -17,7 +17,16 @@ export function inferNavigationFromText(text, customers = []) {
     return null;
   }
 
-  // 1. Explicit Total/All customers summary
+  // 1a. Dedicated all-customer ledger blocks page
+  if (
+    /(customer\s+ledgers?|all\s+ledgers?|open\s+ledgers?|ledgers?\s+page|all\s+khatas?|every\s+customer|each\s+customer|individual\s+customer\s+blocks?|sabhi\s+ka\s+khata|har\s+customer)/i.test(
+      low
+    )
+  ) {
+    return { tab: "ledgers", openCustomerId: null, openCustomerName: null };
+  }
+
+  // 1b. Explicit Total/All customers summary
   if (
     /(total\s+customer|all\s+customer|sabhi\s+customer|saare\s+customer|show\s+customers|list\s+customers|open\s+customers|customers\s+page|customers\s+tab)/i.test(
       low

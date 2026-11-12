@@ -44,24 +44,25 @@ def _row_to_customer(row, container: AppContainer) -> CustomerOut:
     )
 
 
+def _row_to_tx(row: dict) -> TransactionOut:
+    return TransactionOut(
+        id=int(row["id"]),
+        customer_id=int(row["customer_id"]),
+        customer_name=row["customer_name"],
+        amount=float(row["amount"]),
+        tx_type=row["tx_type"],
+        transaction_date=row["transaction_date"],
+        status=row["status"],
+        note=row["note"],
+        confidence=float(row["confidence"]),
+        created_at=row["created_at"],
+    )
+
+
 @router.get("/dashboard", response_model=DashboardSummary)
 def get_dashboard(container: AppContainer = Depends(get_container)) -> DashboardSummary:
     summary = container.db.get_dashboard_summary(today_str=date.today().isoformat(), recent_limit=12)
-    recent = [
-        TransactionOut(
-            id=int(r["id"]),
-            customer_id=int(r["customer_id"]),
-            customer_name=r["customer_name"],
-            amount=float(r["amount"]),
-            tx_type=r["tx_type"],
-            transaction_date=r["transaction_date"],
-            status=r["status"],
-            note=r["note"],
-            confidence=float(r["confidence"]),
-            created_at=r["created_at"],
-        )
-        for r in summary["recent_transactions"]
-    ]
+    recent = [_row_to_tx(r) for r in summary["recent_transactions"]]
     return DashboardSummary(
         today_credit=summary["today_credit"],
         today_payment=summary["today_payment"],
@@ -133,21 +134,20 @@ def delete_customer(customer_id: int, container: AppContainer = Depends(get_cont
 @router.get("/customers/{customer_id}/transactions", response_model=list[TransactionOut])
 def get_customer_transactions(customer_id: int, container: AppContainer = Depends(get_container)) -> list[TransactionOut]:
     rows = container.db.list_customer_transactions(customer_id)
-    return [
-        TransactionOut(
-            id=int(r["id"]),
-            customer_id=int(r["customer_id"]),
-            customer_name=r["customer_name"],
-            amount=float(r["amount"]),
-            tx_type=r["tx_type"],
-            transaction_date=r["transaction_date"],
-            status=r["status"],
-            note=r["note"],
-            confidence=float(r["confidence"]),
-            created_at=r["created_at"],
-        )
-        for r in rows
-    ]
+    return [_row_to_tx(r) for r in rows]
+
+
+@router.get("/transactions", response_model=list[TransactionOut])
+def list_transactions(
+    customer_id: int | None = None,
+    container: AppContainer = Depends(get_container),
+) -> list[TransactionOut]:
+    rows = (
+        container.db.list_customer_transactions(customer_id)
+        if customer_id is not None
+        else container.db.list_all_transactions()
+    )
+    return [_row_to_tx(r) for r in rows]
 
 
 @router.post("/transactions", response_model=TransactionOut, status_code=201)
