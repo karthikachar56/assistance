@@ -493,6 +493,53 @@ def test_two_accounts_have_isolated_databases_and_calculations(api_client):
     assert api_client.get("/api/customers", headers={"Authorization": "Bearer vk1.invalid.sig"}).status_code == 401
 
 
+def test_serverless_cross_container_token_and_fallback_503(monkeypatch, tmp_path):
+    from fastapi import HTTPException
+
+    from app import config as config_mod
+    from app.db import crypto as crypto_mod
+    from app.deps import build_container, get_container
+    from app.routers.auth import resolve_user_from_token
+
+    monkeypatch.setenv("VERCEL", "1")
+    monkeypatch.setenv("LEDGER_ENCRYPTION_KEY", "")
+    monkeypatch.setenv("MONGODB_URL", "mongodb+srv://demo:pass@cluster.example.net/voice_khata")
+    config_mod.get_settings.cache_clear()
+
+    try:
+        monkeypatch.setattr(crypto_mod, "_KEY_FILE", tmp_path / "missing_ro" / ".ledger.key")
+        monkeypatch.setattr(crypto_mod, "_TMP_KEY_FILE", tmp_path / "container_a" / "ledger.key")
+        cipher_a = crypto_mod.FieldCipher("")
+        token = cipher_a.sign_token({"sub": 1, "email": "owner@example.com"})
+
+        # Simulate a second cold serverless container with a fresh /tmp path
+        monkeypatch.setattr(crypto_mod, "_TMP_KEY_FILE", tmp_path / "container_b" / "ledger.key")
+        cipher_b = crypto_mod.FieldCipher("")
+        claims = cipher_b.verify_token(token)
+        assert claims is not None
+        assert claims["sub"] == 1
+
+        # Simulate transient MongoDB fallback: missing user in SQLite fallback must return 503, not 401
+        container = get_container()
+        fallback_container = build_container(
+            settings=config_mod.Settings(
+                ledger_encryption_key="test-secret",
+                mongodb_url="mongodb+srv://demo:pass@cluster.example.net/voice_khata",
+            ),
+            db_path=str(tmp_path / "fallback.db"),
+        )
+        fallback_container.storage_fallback_reason = "MongoDB temporarily unreachable"
+        tok = fallback_container.cipher.sign_token({"sub": 999, "email": "missing@example.com"})
+        try:
+            resolve_user_from_token(tok, fallback_container)
+            raise AssertionError("Expected HTTPException")
+        except HTTPException as exc:
+            assert exc.status_code == 503
+        assert container is not None
+    finally:
+        config_mod.get_settings.cache_clear()
+
+
 
 
 

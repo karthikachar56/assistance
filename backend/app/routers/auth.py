@@ -47,6 +47,11 @@ def resolve_user_from_token(token: str | None, container: AppContainer) -> dict:
         raise HTTPException(status_code=401, detail="Invalid session token.") from exc
     user = container.db.get_user_by_id(user_id)
     if not user:
+        if container.storage_fallback_reason is not None and container.settings.has_mongo:
+            raise HTTPException(
+                status_code=503,
+                detail="Primary database temporarily unreachable; please retry.",
+            )
         raise HTTPException(status_code=401, detail="User session not found. Please sign in again.")
     return user
 

@@ -259,12 +259,18 @@ export default function App() {
         setCurrentUser(me);
         setOfflineCount(getOfflineQueue(me?.id).length);
         await refreshAll();
-      } catch {
-        clearAuthToken();
+      } catch (err) {
         if (!active) return;
-        currentUserRef.current = null;
-        setCurrentUser(null);
-        setOfflineCount(0);
+        if (err?.status === 401) {
+          clearAuthToken();
+          currentUserRef.current = null;
+          setCurrentUser(null);
+          setOfflineCount(0);
+          setAuthMode("login");
+          setAuthError("Your session expired. Please sign in again.");
+        } else {
+          setAuthError(err?.message || "Backend service temporarily unavailable. Please try again.");
+        }
         try {
           const st = await api.status();
           if (active) setStatusInfo(st);

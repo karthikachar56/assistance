@@ -42,15 +42,35 @@ def _decode_or_derive_key(raw: str) -> bytes:
     return hashlib.sha256(cleaned.encode("utf-8")).digest()
 
 
+def _serverless_fallback_seed(settings: Any) -> str | None:
+    """Return stable shared secret material across serverless instances when LEDGER_ENCRYPTION_KEY is unset."""
+    mongo = (settings.mongodb_url or os.environ.get("MONGODB_URL") or os.environ.get("MONGODB_URI") or "").strip().strip('"').strip("'")
+    if mongo:
+        return f"mongo:{mongo}"
+    gemini = (settings.gemini_api_key or os.environ.get("GEMINI_API_KEY") or "").strip().strip('"').strip("'")
+    if gemini and gemini != "your_gemini_api_key_here":
+        return f"gemini:{gemini}"
+    gnani = (settings.gnani_api_key or os.environ.get("GNANI_API_KEY") or "").strip().strip('"').strip("'")
+    if gnani:
+        return f"gnani:{gnani}"
+    project_id = (os.environ.get("VERCEL_PROJECT_ID") or "").strip()
+    if project_id:
+        return f"vercel:{project_id}"
+    return None
+
+
 class FieldCipher:
     """Authenticated encryption wrapper using AES-256-GCM."""
 
     def __init__(self, key_material: str | None = None) -> None:
-        raw = key_material or get_settings().ledger_encryption_key
+        settings = get_settings()
+        raw = key_material or settings.ledger_encryption_key
         if raw and raw.strip():
             key = _decode_or_derive_key(raw)
         elif _KEY_FILE.exists():
             key = _decode_or_derive_key(_KEY_FILE.read_text(encoding="utf-8"))
+        elif settings.is_serverless and (serverless_seed := _serverless_fallback_seed(settings)):
+            key = hashlib.sha256(b"voice-khata-serverless:" + serverless_seed.encode("utf-8")).digest()
         elif _TMP_KEY_FILE.exists():
             key = _decode_or_derive_key(_TMP_KEY_FILE.read_text(encoding="utf-8"))
         else:
